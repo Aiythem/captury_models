@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import tkinter as tk
+from tkinter import ttk
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -412,6 +413,7 @@ class TkC3DTrialCanvas(tk.Canvas):
         self.frame = 0
         self.camera = default_camera_matrix()
         self.zoom = 1.0
+        self.pan_pixels = np.zeros(2)
         self.selected_label: str | None = None
         self.selected_markers: dict[str, set[str]] = {}
         self.marker_source = "motive"
@@ -521,12 +523,14 @@ class TkC3DTrialCanvas(tk.Canvas):
     def reset_camera(self) -> None:
         self.camera = default_camera_matrix()
         self.zoom = 1.0
+        self.pan_pixels = np.zeros(2)
         self._show_labels = True
         self.redraw()
 
     def set_camera_plane(self, plane: str) -> None:
         self.camera = camera_matrix_for_plane(plane)
         self.zoom = 1.0
+        self.pan_pixels = np.zeros(2)
         self.redraw()
 
     def set_subject_view(self, view: str) -> None:
@@ -535,6 +539,7 @@ class TkC3DTrialCanvas(tk.Canvas):
             return
         self.camera = self._subject_camera_matrix(view, points)
         self.zoom = 1.0
+        self.pan_pixels = np.zeros(2)
         self.redraw()
 
     @staticmethod
@@ -668,6 +673,8 @@ class TkC3DTrialCanvas(tk.Canvas):
         return self._visible_chain_points_array()
 
     def _on_mouse_down(self, event: tk.Event) -> None:
+        self.focus_set()
+        self._drag_pan = bool(event.state & 0x0001)
         self._is_dragging = True
         self._show_labels = False
         self._last_mouse_xy = (float(event.x), float(event.y))
@@ -679,9 +686,12 @@ class TkC3DTrialCanvas(tk.Canvas):
         last_x, last_y = self._last_mouse_xy
         delta_x = float(event.x) - last_x
         delta_y = float(event.y) - last_y
-        self.camera = normalized_camera_matrix(
-            rotation_matrix_from_drag(delta_x, delta_y) @ self.camera
-        )
+        if self._drag_pan:
+            self.pan_pixels += (delta_x, delta_y)
+        else:
+            self.camera = normalized_camera_matrix(
+                rotation_matrix_from_drag(delta_x, delta_y) @ self.camera
+            )
         self._last_mouse_xy = (float(event.x), float(event.y))
         self._request_redraw()
 
@@ -699,7 +709,9 @@ class TkC3DTrialCanvas(tk.Canvas):
         self.redraw()
 
     def _on_mouse_wheel(self, event: tk.Event) -> None:
-        self._zoom(1.12 if event.delta > 0 else 1 / 1.12)
+        if event.delta:
+            self._zoom(1.12 if event.delta > 0 else 1 / 1.12)
+        return "break"
 
     def _zoom(self, factor: float) -> None:
         self.zoom = max(0.05, min(self.zoom * factor, 30.0))
@@ -739,6 +751,9 @@ class TkC3DTrialCanvas(tk.Canvas):
             self._draw_empty_message(width, height, "Aucune couche visible")
             return
         center, scale = fit_center_and_scale(fit_points, width, height, self.camera)
+        center = center - self.camera.T @ np.array(
+            [self.pan_pixels[0], -self.pan_pixels[1], 0.0]
+        ) / max(scale * self.zoom, 1e-12)
         for source in ("captury", "motive", "biobuddy"):
             if source not in self.visible_marker_sources:
                 continue
@@ -1030,3 +1045,84 @@ class TkC3DTrialCanvas(tk.Canvas):
         text = f"{self.frame + 1}/{self.data.n_frames}"
         self.create_rectangle(8, 8, 86, 32, fill="#ffffff", outline="#e5e7eb")
         self.create_text(16, 20, text=text, anchor="w", fill="#334155")
+
+
+def open_trial_view_window(parent, source, title="Visu 3D essai"):
+    """Open an independent view of the currently loaded markers and CoR chains."""
+    window = tk.Toplevel(parent)
+    window.title(title)
+    window.geometry("1100x800")
+    toolbar = ttk.Frame(window)
+    toolbar.pack(fill="x", padx=8, pady=6)
+    viewer = TkC3DTrialCanvas(window)
+    viewer.pack(fill="both", expand=True, padx=8)
+    for name in ("data", "chain_data", "frame", "marker_source", "selected_label",
+                 "show_chain_axes", "rotate_body_segments_180_x", "zoom"):
+        setattr(viewer, name, getattr(source, name))
+    viewer.marker_layers = dict(source.marker_layers)
+    viewer.marker_time_offsets_s = dict(source.marker_time_offsets_s)
+    viewer.selected_markers = {k: set(v) for k, v in source.selected_markers.items()}
+    viewer.visible_marker_sources = set(source.visible_marker_sources)
+    viewer.visible_cor_layers = set(source.visible_cor_layers)
+    viewer.camera = source.camera.copy()
+    viewer.pan_pixels = source.pan_pixels.copy()
+    ttk.Label(toolbar, text="Glisser : rotation • Maj + glisser : déplacer • Molette : zoom").pack(side="left")
+    for label, action in (("−", lambda: viewer._zoom(1 / 1.25)),
+                          ("+", lambda: viewer._zoom(1.25)), ("Recentrer", viewer.reset_camera)):
+        ttk.Button(toolbar, text=label, command=action).pack(side="right", padx=3)
+    layers = ttk.Frame(window)
+    layers.pack(fill="x", padx=8, pady=4)
+    variables = []
+    for label, available, visible in (
+        ("Marqueurs", viewer.marker_layers, viewer.visible_marker_sources),
+        ("CoR", viewer.chain_data.layers if viewer.chain_data else {}, viewer.visible_cor_layers),
+    ):
+        ttk.Label(layers, text=label).pack(side="left", padx=5)
+        for key in available:
+            var = tk.BooleanVar(window, value=key in visible)
+            variables.append(var)
+            def toggle(key=key, var=var, visible=visible):
+                visible.add(key) if var.get() else visible.discard(key)
+                viewer.redraw()
+            ttk.Checkbutton(layers, text=COR_LAYER_LABELS.get(key, key), variable=var,
+                            command=toggle).pack(side="left")
+    controls = ttk.Frame(window)
+    controls.pack(fill="x", padx=8, pady=8)
+    frame = tk.DoubleVar(window, value=viewer.frame)
+    playing = False
+    timer = None
+    def seek(value):
+        viewer.set_frame(int(float(value)))
+    slider = ttk.Scale(controls, from_=0, to=max(0, viewer.n_frames - 1),
+                       variable=frame, command=seek)
+    def tick():
+        nonlocal timer
+        timer = None
+        if playing and viewer.n_frames:
+            viewer.set_frame((viewer.frame + 1) % viewer.n_frames)
+            frame.set(viewer.frame)
+            rate = viewer.data.rate if viewer.data is not None else 120
+            timer = window.after(max(1, round(1000 / max(rate, 1))), tick)
+    def toggle_play():
+        nonlocal playing, timer
+        playing = not playing
+        button.configure(text="Pause" if playing else "Lecture")
+        if playing:
+            tick()
+        elif timer is not None:
+            window.after_cancel(timer)
+            timer = None
+    button = ttk.Button(controls, text="Lecture", command=toggle_play)
+    button.pack(side="left", padx=4)
+    slider.pack(side="left", fill="x", expand=True)
+    def close():
+        nonlocal playing
+        playing = False
+        if timer is not None:
+            window.after_cancel(timer)
+        window.destroy()
+    window.protocol("WM_DELETE_WINDOW", close)
+    window.viewer = viewer
+    window.layer_variables = variables
+    viewer.redraw()
+    return window

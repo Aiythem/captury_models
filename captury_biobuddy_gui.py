@@ -1803,6 +1803,16 @@ class CapturyBioBuddyGui(tk.Tk):
 
         self.embedded_viewer = TkC3DTrialCanvas(panel)
         self.embedded_viewer.grid(row=3, column=0, sticky="nsew", padx=8, pady=4)
+        ttk.Label(view_bar, text="Maj + glisser : déplacer • Molette : zoom").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        camera_controls = ttk.Frame(view_bar)
+        camera_controls.grid(row=2, column=0, columnspan=2, sticky="w")
+        for label, action in (("−", lambda: self.embedded_viewer._zoom(1 / 1.25)),
+                              ("+", lambda: self.embedded_viewer._zoom(1.25)),
+                              ("Recentrer", self.embedded_viewer.reset_camera)):
+            ttk.Button(camera_controls, text=label, command=action).pack(side="left", padx=2)
+
 
         controls = ttk.Frame(panel)
         controls.grid(row=4, column=0, sticky="ew", padx=8, pady=(4, 8))
@@ -4402,30 +4412,14 @@ class CapturyBioBuddyGui(tk.Tk):
         return None
 
     def _open_selected_trial_viewer(self) -> None:
-        c3d_path = self._selected_trial_c3d_path()
-        if c3d_path is None:
-            messagebox.showerror(
-                "C3D introuvable",
-                "Aucun C3D Motive ou Captury n'a été trouvé pour l'essai sélectionné.",
-            )
+        from gui_trial_viewer import open_trial_view_window
+
+        source = self.embedded_viewer
+        if not source.marker_layers and source.chain_data is None:
+            messagebox.showinfo("Visu 3D essai", "Charge un essai avant d'ouvrir la grande fenêtre.")
             return
-        if importlib.util.find_spec("PySide6") is None:
-            messagebox.showerror(
-                "PySide6 manquant",
-                "La visualisation 3D intégrée nécessite PySide6. "
-                "Mets l'environnement à jour avec environment_bvh_c3d_biobuddy.yml.",
-            )
-            return
-        command = [sys.executable, str(C3D_VIEWER_SCRIPT), str(c3d_path)]
-        env = os.environ.copy()
-        env.setdefault("MPLCONFIGDIR", "/private/tmp/captury_models_mplconfig")
-        try:
-            subprocess.Popen(command, cwd=PROJECT_DIR, env=env)
-        except Exception as exc:
-            messagebox.showerror("Visu 3D C3D", f"Impossible de lancer la visu:\n{exc}")
-            return
-        self._append_log("$ " + " ".join(shlex.quote(part) for part in command) + "\n")
-        self.status_var.set(f"Visu 3D lancée: {c3d_path.name}")
+        open_trial_view_window(source.winfo_toplevel(), source,
+                               "Visu 3D essai — " + self.viewer_path_var.get())
 
     def _run_selected_command(self) -> None:
         if self.process is not None:
