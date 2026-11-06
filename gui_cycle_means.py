@@ -110,6 +110,7 @@ def draw_selected_leg_means(
     if joint not in JOINT_LABELS:
         raise ValueError(f"Unknown joint: {joint}")
     figure.clear()
+    figure.set_layout_engine("constrained")
     axes = np.atleast_1d(figure.subplots(1, 3))
     if curves is None:
         path = Path(trial_dir) / "lower_limb_kinematics.npz"
@@ -139,7 +140,7 @@ def draw_selected_leg_means(
                 if status == "model_reference_polarity"
                 else "signe natif · à vérifier"
             )
-            label = f"{source} · {curve['q_name']} (n={curve['n_cycles']}) · {note}"
+            label = f"{source} · {curve['q_name']}\n(n={curve['n_cycles']}) · {note}"
             ax.plot(
                 curve["phase_percent"],
                 values,
@@ -150,7 +151,7 @@ def draw_selected_leg_means(
         missing = available_sources - {c["source"] for c in found}
         title = plane
         if missing:
-            title += " — indisponible : " + ", ".join(sorted(missing))
+            title += "\nIndisponible :\n" + ", ".join(sorted(missing))
         ax.set_title(title, fontsize=10)
         positive = sorted({c.get("positive_direction", "") for c in found} - {""})
         ax.set_ylabel(
@@ -178,7 +179,6 @@ def draw_selected_leg_means(
         + "\nCoordonnées natives; équivalence anatomique non établie",
         fontsize=9,
     )
-    figure.subplots_adjust(left=0.06, right=0.98, top=0.80, bottom=0.18, wspace=0.36)
     return list(axes)
 
 
