@@ -754,3 +754,88 @@ Each cached summary reports elapsed time, `nfev`, successful frames and marker r
 P6 `Marche_001` remains a scientific warning rather than a solver-performance target: the complete trial converges in about 8.8 s but retains 34.95 mm mean marker error. At its first frame, independent rigid fits of marker clusters from the static model are only 0.23-6.15 mm RMSE, while the linked BioBuddy chain produces its largest residuals on upper arms and hands. This points toward inter-segment geometry, functional joint centres/axes or model constraints, rather than a global unit error. No acceptance threshold is silently applied: converged frames remain `diagnostic_only` until this dynamic inconsistency is resolved. BioBuddy DoF names are not assumed homologous to Motive/Captury export names; cross-model kinematics are compared through segment rotation matrices and audited joint conventions until an explicit anatomical DoF map exists.
 
 The “Visu 3D essai” preview supports Shift-drag panning, ordinary drag rotation, wheel zoom, and −/+/Recentrer buttons. “Grande fenêtre” opens an independent snapshot of the loaded trial with the same marker and CoR layers, selected frame, camera, and visibility settings; it includes layer toggles, a frame slider, and playback. Reopen it to load a different trial or refreshed analysis.
+
+
+## Cycle normalization and reviewed CSV export
+
+The **Cycle normalization** tab supports `gait`, `squat`, and `jump`.
+Choose a trial and task, then press **Détecter et normaliser**. Detection and
+normalization save internal NPZ/JSON results; they do not automatically export
+cycle CSVs. Existing CSVs from older runs are not refreshed or used as the
+current cycle cache.
+
+- **Gait:** same-foot initial contact to next initial contact, using the existing
+  Ghoussayni sagittal heel/toe velocity adaptation. Marker filtering remains
+  internal (default 7 Hz); its control has been removed from this tab.
+- **Squat:** standing → deepest knee flexion → standing. Automatic detection
+  uses the minimum of the two geometric hip–knee–ankle flexion angles from
+  Motive joint centres, without interpreting a native Euler channel as flexion.
+  Standing boundaries bracket excursions above 15°, with at least 40° peak
+  bilateral flexion by default. This is a geometric event proxy, not an ISB angle.
+- **Jump:** estimated take-off → landing. All four heel/forefoot markers
+  (`LFCC`, `LFM2`, `RFCC`, `RFM2`) must rise above their individual 10th-percentile
+  height baselines by 30 mm. Boundaries bracket the excursion. These marker
+  thresholds approximate flight boundaries and require observed ground contact;
+  they are not force-plate events.
+
+**Paramètres de détection et normalisation…** exposes thresholds, duration limits,
+interpolation gap and sample count. Changing tasks initializes duration limits
+(gait: 0.4–2.5 s; squat: 0.4–10 s; jump: 0.1–2.5 s). Partial excursions,
+missing boundary data and timestamp gaps are rejected. Review automatic events
+before interpreting the normalized curves.
+
+Choose `reviewed` to supply event CSVs on the Motive elapsed clock:
+`trial,side,time_s` for gait contacts (`side` = `left` or `right`), or
+`trial,start_s,end_s` for non-overlapping squat/jump intervals. Bilateral tasks
+use the same cycle intervals for both sides and all available model sources.
+
+Tick the cycles to keep in the separate **Left** and **Right** checkbox lists.
+Each side can be selected independently, including for bilateral squat/jump
+intervals. **Tout cocher / Tout décocher** selects or clears all checkboxes.
+Unchecked cycles are excluded from plotted curves and CSVs. Choices persist
+for the exact detection report and reset when it changes. Rejected candidates
+remain in the JSON report.
+
+Only **Exporter les CSV sélectionnés…** creates the export files. Enter a
+filename prefix (default: trial + task), then choose the destination. For example,
+`MySession_knee_cycles.csv` contains selected squat/jump knee curves. The export
+includes normalized and raw hip/knee/ankle tables, combined tables, metrics and
+a JSON report listing included/excluded cycle IDs. Raw tables are restricted to
+the selected time intervals per side. No selected cycles means no export.
+
+Normalized curves retain native source coordinate names and units (degrees or
+millimetres); unavailable DoFs are not fabricated. Angular interpolation unwraps
+within observed spans; gaps longer than the configured limit remain unavailable.
+Task detection and cycle normalization do not establish anatomical agreement.
+
+CLI normalization uses `--normalize-gait --cycle-task gait|squat|jump` (the legacy
+flag name is retained), with `--cycle-detection automatic|reviewed` and optional
+`--gait-events-csv`. Squat thresholds are `--squat-standing-deg` and
+`--squat-peak-deg`; jump height is `--jump-height-mm`. Set duration limits explicitly
+on the CLI, for example `--gait-min-cycle-s 0.4 --gait-max-cycle-s 10` for squat.
+CLI analysis caches the results for later explicit GUI export.
+
+
+### Selected means and sign conventions
+
+Selected right-leg means are displayed in separate Hip, Knee and Ankle figures,
+each containing sagittal, frontal and transverse panels in a horizontal row.
+Means give equal weight to valid selected cycles; legends show the cycle count.
+
+Native channel signs are checked against the serialized model before a fixed
+polarity correction is shared by plots and CSV exports. Positive directions are
+hip/knee flexion, adduction and internal rotation, and ankle dorsiflexion and
+inversion. Unverified or oblique channels retain their original sign and an
+explicit pending status. Ankle transverse mapping remains pending. This polarity
+check is diagnostic and does not establish anatomical frame equivalence.
+
+Reference: Claudiane A. Fukuchi, Reginaldo K. Fukuchi and Marcos Duarte (2018),
+*A public dataset of overground and treadmill walking kinematics and kinetics in
+healthy individuals*, PeerJ 6:e4640, https://doi.org/10.7717/peerj.4640.
+
+Exported normalized curves contain exactly 101 samples per source, side, joint,
+coordinate and selected cycle: `point_index` 1–101 and `phase_percent` 0–100.
+Interpolation coverage and gap limits still apply. Unavailable curves retain 101
+NaN rows with their status. Raw-time CSVs preserve the original sampling.
+`raw_value`, `sign_multiplier`, the model fingerprint and reference are retained
+for traceability, alongside the included/excluded cycle IDs in the export report.

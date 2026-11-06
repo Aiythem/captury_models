@@ -83,6 +83,9 @@ class ComparisonProvenanceTests(unittest.TestCase):
                 "comparison_batch",
                 "available_source_results",
                 "comparison_workflow",
+                "gait_cycles",
+                "task_cycles",
+                "ghoussayni",
                 "kinematic_conventions_registry",
                 "kinematic_conventions_code",
                 "kinematic_rotations_code",
@@ -103,6 +106,14 @@ class ComparisonProvenanceTests(unittest.TestCase):
             },
         )
         self.assertNotEqual(first["digest"], second["digest"])
+        args.gait_velocity_threshold_m_s = 0.25
+        with patch.object(comparison, "file_fingerprint", side_effect=fingerprint):
+            threshold_changed = comparison.trial_cache_fingerprint(bundle, args)
+        self.assertNotEqual(second["digest"], threshold_changed["digest"])
+        args.gait_filter_hz = 6.0
+        with patch.object(comparison, "file_fingerprint", side_effect=fingerprint):
+            filter_changed = comparison.trial_cache_fingerprint(bundle, args)
+        self.assertNotEqual(threshold_changed["digest"], filter_changed["digest"])
 
     def test_biobuddy_ik_outputs_must_exist_before_trial_cache_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

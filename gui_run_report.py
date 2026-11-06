@@ -36,6 +36,24 @@ def summarize_run_report(report: Mapping[str, Any]) -> str:
     trial = report.get("trial")
     if trial:
         lines.append(f"Essai: {trial}")
+    gait = report.get("gait_normalization", {})
+    if gait and gait.get("status") not in {"disabled", "static_trial"}:
+        event_label = (
+            "contacts CSV"
+            if gait.get("method") == "supplied_initial_contacts"
+            else (
+                "Ghoussayni (vitesse sagittale talon/avant-pied)"
+                if gait.get("method", "").startswith("ghoussayni")
+                else "contacts estimés par marqueurs"
+            )
+        )
+        lines.append(
+            f"Cycles candidats complets 0–100 %: {len(gait.get('cycles', []))}; {event_label}"
+        )
+        if gait.get("unavailable_curve_cycles"):
+            lines.append(
+                f"Courbes/cycles indisponibles (couverture ou lacunes): {gait['unavailable_curve_cycles']}"
+            )
     if report.get("workflow") in {"source_comparison", "motive_biobuddy"}:
         labels = {"captury": "Captury", "motive": "Motive", "biobuddy": "BioBuddy"}
         available = report.get("available_sources", [])

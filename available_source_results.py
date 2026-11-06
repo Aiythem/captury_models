@@ -161,6 +161,10 @@ def compare_available_trial(bundle, out_root, args, *, api, calibration=None):
             bundle.motive_c3d,
             trial_dir,
             bundle.name,
+            gait_velocity_threshold_m_s=getattr(
+                args, "gait_velocity_threshold_m_s", 0.5
+            ),
+            gait_filter_hz=getattr(args, "gait_filter_hz", 7.0),
         )
     if (
         full_runs
@@ -186,6 +190,10 @@ def compare_available_trial(bundle, out_root, args, *, api, calibration=None):
             bundle.name,
             time_start_s=start,
             time_end_s=end,
+            gait_velocity_threshold_m_s=getattr(
+                args, "gait_velocity_threshold_m_s", 0.5
+            ),
+            gait_filter_hz=getattr(args, "gait_filter_hz", 7.0),
         )
     runs, centres, rotations, times = [], {}, {}, {}
     registry = c.load_kinematic_conventions()
@@ -306,7 +314,25 @@ def compare_available_trial(bundle, out_root, args, *, api, calibration=None):
         path = trial_dir / "motive_static_alignment.json"
         path.write_text(json.dumps(calibration, indent=2))
         outputs["motive_static_alignment"] = str(path)
-    if not motive_clock:
+    if motive_clock:
+        gait_report, gait_outputs = c.write_trial_gait_exports(
+            bundle, trial_dir, args, full_runs, full_contact_rows, start, end
+        )
+        outputs.update(gait_outputs)
+    else:
+        gait_report, gait_outputs = c.export_gait_results(
+            trial_dir,
+            bundle.name,
+            full_runs,
+            [],
+            participant=bundle.participant,
+            enabled=False,
+            write_npz=c.write_table_npz,
+            task=getattr(args, "cycle_task", "gait"),
+        )
+        gait_report.update(status="unavailable", reason="no_registered_motive_clock")
+        (trial_dir / "gait_cycles.json").write_text(json.dumps(gait_report, indent=2))
+        outputs.update(gait_outputs)
         (trial_dir / "trial_events.json").write_text(json.dumps(event_report, indent=2))
         c.write_rows(trial_dir / "trial_events_contacts.csv", [])
     for filename in (
@@ -367,6 +393,7 @@ def compare_available_trial(bundle, out_root, args, *, api, calibration=None):
         "segment_rotations": segment_report,
         "bvh_fbx_rotation_audit": audits,
         "trial_events": event_report,
+        "gait_normalization": gait_report,
         "outputs": outputs,
         "skin_marker_correspondence": {
             "status": "unavailable",
