@@ -76,6 +76,28 @@ During animation, the marker overlay contains the C3D marker points after this a
 
 ## Run
 
+### Select available comparison sources
+
+In **Données → Sources à inclure si disponibles**, select Captury, Motive and/or
+BioBuddy. The same workflow uses whichever selected sources are available for
+each trial; a missing Captury recording no longer hides Motive-only trials.
+The CLI equivalent is `--sources motive biobuddy` (default: all three).
+Reports identify requested, used and missing sources and explain unavailable data.
+
+BioBuddy requires its model and Motive C3D marker recording, independently of
+whether the Motive skeleton is selected. Lightweight analyses reuse compatible
+saved IK; enable the existing BioBuddy IK batch option to compute missing IK.
+Native q curves stay separate by source. Without paired capture registration,
+Captury/BioBuddy spatial overlays and paired metrics remain unavailable.
+
+The available-source adapter freezes Motive's existing marker-proxy alignment
+from Static and leaves BioBuddy in its C3D fitting frame. Adding Captury later
+uses the existing paired static registration in the same workflow. This feature
+does not establish anatomical equivalence or change joint-angle conventions.
+When no capture pair is available, disable the existing 180-degree segment-frame
+rotation and ZXY reexpression options; this adapter displays native coordinates.
+
+
 To launch the graphical interface:
 
 ```bash

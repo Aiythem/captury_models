@@ -49,6 +49,7 @@ from mocap_alignment import (
     kabsch_rows,
 )
 from mocap_labels import (
+    DEFAULT_MARKER_PREFIXES_TO_STRIP,
     display_marker_name,
     is_joint_centre_marker_label,
     marker_display_labels,
@@ -60,7 +61,11 @@ from model_comparison_metrics import (
     joint_center_error_xyz,
     waveform_metrics,
 )
-from run_biobuddy_c3d_ik import run_direct_biobuddy_ik
+from run_biobuddy_c3d_ik import (
+    cached_ik_is_valid,
+    ik_cache_fingerprint,
+    run_direct_biobuddy_ik,
+)
 from spatial_calibration import (
     RowRigidTransform,
     SpatialCalibration,
@@ -133,6 +138,8 @@ DEFAULT_ALIGNMENT_CALIBRATION_CENTRES = (
 )
 SCIENTIFIC_IMPLEMENTATION_FILES = {
     "comparison_batch": Path(__file__),
+    "available_source_results": Path(__file__).with_name("available_source_results.py"),
+    "comparison_workflow": Path(__file__).with_name("comparison_workflow.py"),
     "kinematic_conventions_registry": Path(__file__).with_name(
         "kinematic_conventions.json"
     ),
@@ -185,10 +192,10 @@ MODEL_JOINT_MARKER_PROXIES = {
 @dataclass
 class TrialBundle:
     name: str
-    captury_c3d: Path
+    captury_c3d: Path | None
     captury_bvh: Path | None
     captury_fbx: Path | None
-    motive_c3d: Path
+    motive_c3d: Path | None
     motive_bvh: Path | None
     motive_fbx: Path | None
     participant: str | None = None
@@ -247,6 +254,27 @@ def trial_cache_fingerprint(
         SpatialCalibration | tuple[np.ndarray, np.ndarray] | None
     ) = None,
 ) -> dict[str, Any]:
+    cached_ik_inputs = {}
+    if (
+        args.biobuddy_biomod
+        and args.biobuddy_biomod.is_file()
+        and not args.run_ik_batch
+    ):
+        fingerprint = biobuddy_ik_cache_fingerprint(
+            args.biobuddy_biomod,
+            bundle.motive_c3d,
+            args.biobuddy_unit_scale_to_m,
+            args.ik_max_frames,
+            args.angle_label_regex,
+        )
+        directory = args.out_dir / "biobuddy_ik_cache" / fingerprint["digest"]
+        cached_ik_inputs = {
+            name: file_fingerprint(directory / name)
+            for name in (
+                "inverse_kinematics_trf.npz",
+                "inverse_kinematics_trf_summary.json",
+            )
+        }
     payload = {
         "cache_version": CACHE_VERSION,
         "implementation": {
@@ -254,6 +282,7 @@ def trial_cache_fingerprint(
             for name, path in SCIENTIFIC_IMPLEMENTATION_FILES.items()
         },
         "inputs": {
+            "cached_biobuddy_ik": cached_ik_inputs,
             "captury_c3d": file_fingerprint(bundle.captury_c3d),
             "captury_bvh": file_fingerprint(bundle.captury_bvh),
             "captury_fbx": file_fingerprint(bundle.captury_fbx),
@@ -265,6 +294,9 @@ def trial_cache_fingerprint(
             ),
         },
         "options": {
+            "sources": list(
+                getattr(args, "sources", ("captury", "motive", "biobuddy"))
+            ),
             "model_source": args.model_source,
             "audit_bvh_fbx_rotations": bool(
                 getattr(args, "audit_bvh_fbx_rotations", False)
@@ -686,31 +718,33 @@ def metric_sensitivity_report(
 
 
 def discover_trials(data_root: Path) -> list[TrialBundle]:
-    if (data_root / "Captury").is_dir() and (data_root / "Motive").is_dir():
+    if (data_root / "Motive").is_dir() or (data_root / "Captury").is_dir():
         return discover_flat_trials(data_root)
 
     trials: list[TrialBundle] = []
     for trial_dir in sorted(path for path in data_root.iterdir() if path.is_dir()):
         captury_dir = trial_dir / "captury"
         motive_dir = trial_dir / "squelettes"
-        if not captury_dir.is_dir() or not motive_dir.is_dir():
+        if not captury_dir.is_dir() and not motive_dir.is_dir():
             continue
         captury_c3d = captury_dir / "P6.c3d"
         motive_c3ds = sorted(motive_dir.glob("*.c3d"))
         motive_bvhs = sorted(motive_dir.glob("*Skeleton 001.bvh"))
         motive_fbxs = sorted(motive_dir.glob("*.fbx"))
-        if not captury_c3d.exists() or not motive_c3ds:
+        if not captury_c3d.exists() and not motive_c3ds:
             continue
         trials.append(
             TrialBundle(
                 name=trial_dir.name,
-                captury_c3d=captury_c3d,
+                captury_c3d=first_existing(captury_c3d),
                 captury_bvh=first_existing(captury_dir / "P6.bvh"),
                 captury_fbx=first_existing(captury_dir / "P6.fbx"),
-                motive_c3d=motive_c3ds[0],
+                motive_c3d=motive_c3ds[0] if motive_c3ds else None,
                 motive_bvh=motive_bvhs[0] if motive_bvhs else None,
                 motive_fbx=motive_fbxs[0] if motive_fbxs else None,
-                participant=infer_participant_identifier(captury_c3d, motive_c3ds[0]),
+                participant=infer_participant_identifier(
+                    *([captury_c3d] if captury_c3d.exists() else []) + motive_c3ds[:1]
+                ),
             )
         )
     return trials
@@ -750,20 +784,27 @@ def discover_flat_trials(data_root: Path) -> list[TrialBundle]:
         ] = path
 
     trials: list[TrialBundle] = []
-    for trial in sorted(set(captury).intersection(motive)):
-        if "c3d" not in captury[trial] or "c3d" not in motive[trial]:
+    trial_names = set(captury).union(motive)
+    for trial in sorted(trial_names):
+        cap_files = captury.get(trial, {})
+        mot_files = motive.get(trial, {})
+        if "c3d" not in cap_files and "c3d" not in mot_files:
             continue
         trials.append(
             TrialBundle(
                 name=trial,
-                captury_c3d=captury[trial]["c3d"],
-                captury_bvh=captury[trial].get("bvh"),
-                captury_fbx=captury[trial].get("fbx"),
-                motive_c3d=motive[trial]["c3d"],
-                motive_bvh=motive[trial].get("bvh"),
-                motive_fbx=motive[trial].get("fbx"),
+                captury_c3d=cap_files.get("c3d"),
+                captury_bvh=cap_files.get("bvh"),
+                captury_fbx=cap_files.get("fbx"),
+                motive_c3d=mot_files.get("c3d"),
+                motive_bvh=mot_files.get("bvh"),
+                motive_fbx=mot_files.get("fbx"),
                 participant=infer_participant_identifier(
-                    captury[trial]["c3d"], motive[trial]["c3d"]
+                    *[
+                        path
+                        for path in (cap_files.get("c3d"), mot_files.get("c3d"))
+                        if path
+                    ]
                 ),
             )
         )
@@ -799,28 +840,40 @@ def comparison_input_files(
 ) -> dict[str, Path]:
     """Return every input that materially contributes to this batch run."""
 
+    from comparison_workflow import requested_sources
+
+    selected = requested_sources(args)
     inputs: dict[str, Path] = {}
     for bundle in trials:
         prefix = bundle.name
-        inputs[f"{prefix}/captury/c3d"] = bundle.captury_c3d
-        inputs[f"{prefix}/motive/c3d"] = bundle.motive_c3d
+        if "captury" in selected and bundle.captury_c3d is not None:
+            inputs[f"{prefix}/captury/c3d"] = bundle.captury_c3d
+        if bundle.motive_c3d is not None and (
+            args.occlusions_only or "motive" in selected or "biobuddy" in selected
+        ):
+            inputs[f"{prefix}/motive/c3d"] = bundle.motive_c3d
         if not args.occlusions_only:
             audit_both = bool(
                 getattr(args, "audit_bvh_fbx_rotations", False)
                 or args.model_source == "auto"
             )
             for system in ("captury", "motive"):
+                if system not in selected or getattr(bundle, f"{system}_c3d") is None:
+                    continue
                 bvh = bundle.captury_bvh if system == "captury" else bundle.motive_bvh
                 fbx = bundle.captury_fbx if system == "captury" else bundle.motive_fbx
                 if audit_both and bvh is not None and fbx is not None:
                     inputs[f"{prefix}/{system}/bvh"] = bvh
                     inputs[f"{prefix}/{system}/fbx"] = fbx
                     continue
-                source_kind, source_path = select_model_file(
-                    bundle, system, args.model_source
-                )
+                try:
+                    source_kind, source_path = select_model_file(
+                        bundle, system, args.model_source
+                    )
+                except FileNotFoundError:
+                    continue
                 inputs[f"{prefix}/{system}/{source_kind}"] = source_path
-    if getattr(args, "biobuddy_biomod", None) is not None:
+    if "biobuddy" in selected and getattr(args, "biobuddy_biomod", None) is not None:
         inputs["biobuddy/biomod"] = args.biobuddy_biomod
     if getattr(args, "run_ik_batch", False):
         inputs["implementation/biobuddy_ik_code"] = SCIENTIFIC_IMPLEMENTATION_FILES[
@@ -898,6 +951,11 @@ def comparison_derived_artifacts(
         if spatial_calibration:
             artifacts[f"{trial}/alignment/spatial_calibration"] = Path(
                 spatial_calibration
+            )
+        motive_calibration = report.get("outputs", {}).get("motive_static_alignment")
+        if motive_calibration:
+            artifacts[f"{trial}/alignment/motive_static_alignment"] = Path(
+                motive_calibration
             )
         joint_kinematics = report.get("outputs", {}).get("joint_kinematics_d4_d6")
         if joint_kinematics:
@@ -3217,6 +3275,26 @@ def model_run_from_biobuddy_ik_npz(
     )
 
 
+def biobuddy_ik_cache_fingerprint(
+    biomod_path: Path,
+    c3d_path: Path,
+    unit_scale_to_m: float,
+    max_frames: int,
+    angle_label_regex: str,
+) -> dict[str, Any]:
+    """Identify saved IK using the same defaults as the batch/static solver."""
+    return ik_cache_fingerprint(
+        biomod_path,
+        c3d_path,
+        method="trf",
+        max_frames=max_frames,
+        biomod_unit_scale_to_m=unit_scale_to_m,
+        marker_prefixes_to_strip=DEFAULT_MARKER_PREFIXES_TO_STRIP,
+        angle_label_regex=angle_label_regex,
+        xtol=1e-6,
+    )
+
+
 def run_biobuddy_ik_for_trial(
     bundle: TrialBundle,
     trial_dir: Path,
@@ -3226,6 +3304,8 @@ def run_biobuddy_ik_for_trial(
     angle_label_regex: str,
     cache_dir: Path,
     force: bool = False,
+    *,
+    cache_only: bool = False,
 ) -> tuple[ModelRun | None, dict[str, Any]]:
     """Run or reuse BioBuddy nonlinear TRF IK for one trial."""
 
@@ -3240,18 +3320,42 @@ def run_biobuddy_ik_for_trial(
     ik_dir = trial_dir / "biobuddy_ik"
     source_name = f"biobuddy_{safe_name(bundle.name)}"
     try:
-        report = run_direct_biobuddy_ik(
-            biomod_path,
-            bundle.motive_c3d,
-            ik_dir,
-            source_name=source_name,
-            biomod_unit_scale_to_m=unit_scale_to_m,
-            angle_label_regex=angle_label_regex,
-            max_frames=max_frames,
-            cache_dir=cache_dir,
-            force=force,
-        )
-        ik_npz = Path(report["outputs"]["npz"])
+        if cache_only:
+            fingerprint = biobuddy_ik_cache_fingerprint(
+                biomod_path,
+                bundle.motive_c3d,
+                unit_scale_to_m,
+                max_frames,
+                angle_label_regex,
+            )
+            directory = cache_dir / fingerprint["digest"]
+            ik_npz = directory / "inverse_kinematics_trf.npz"
+            summary = directory / "inverse_kinematics_trf_summary.json"
+            if not summary.is_file() or not ik_npz.is_file():
+                return None, {"status": "missing", "reason": "no_matching_cached_ik"}
+            report = json.loads(summary.read_text(encoding="utf-8"))
+            if report.get("cache", {}).get("digest") != fingerprint[
+                "digest"
+            ] or not cached_ik_is_valid(report, ik_npz):
+                return None, {"status": "missing", "reason": "invalid_cached_ik"}
+            report["cache"]["hit"] = True
+            report["outputs"]["npz"] = str(ik_npz)
+            print(
+                f"[BioBuddy IK] résultat existant réutilisé: {bundle.name}", flush=True
+            )
+        else:
+            report = run_direct_biobuddy_ik(
+                biomod_path,
+                bundle.motive_c3d,
+                ik_dir,
+                source_name=source_name,
+                biomod_unit_scale_to_m=unit_scale_to_m,
+                angle_label_regex=angle_label_regex,
+                max_frames=max_frames,
+                cache_dir=cache_dir,
+                force=force,
+            )
+            ik_npz = Path(report["outputs"]["npz"])
         run = model_run_from_biobuddy_ik_npz(
             biomod_path,
             ik_npz,
@@ -4193,24 +4297,19 @@ def compare_trial(
     temporal_synchronization["evaluation"] = temporal_evaluation
     captury_metrics = trim_model_run(captury, cut_start_s, cut_end_s)
     motive_metrics = trim_model_run(motive, cut_start_s, cut_end_s)
-    biobuddy_run: ModelRun | None = None
-    biobuddy_ik_report: dict[str, Any] = {
-        "status": "skipped",
-        "reason": "run_ik_batch_false",
-    }
-    if args.run_ik_batch:
-        biobuddy_run, biobuddy_ik_report = run_biobuddy_ik_for_trial(
-            bundle,
-            trial_dir,
-            args.biobuddy_biomod,
-            args.biobuddy_unit_scale_to_m,
-            args.ik_max_frames,
-            args.angle_label_regex,
-            args.out_dir / "biobuddy_ik_cache",
-            force=args.no_cache,
-        )
-        if biobuddy_run is not None:
-            biobuddy_run = trim_model_run(biobuddy_run, cut_start_s, cut_end_s)
+    biobuddy_run, biobuddy_ik_report = run_biobuddy_ik_for_trial(
+        bundle,
+        trial_dir,
+        args.biobuddy_biomod,
+        args.biobuddy_unit_scale_to_m,
+        args.ik_max_frames,
+        args.angle_label_regex,
+        args.out_dir / "biobuddy_ik_cache",
+        force=args.no_cache,
+        cache_only=not args.run_ik_batch,
+    )
+    if biobuddy_run is not None:
+        biobuddy_run = trim_model_run(biobuddy_run, cut_start_s, cut_end_s)
     cap_aligned_metrics_mm = trim_centres(
         cap_aligned_mm, time_window_mask(captury.time, cut_start_s, cut_end_s)
     )
@@ -4725,8 +4824,7 @@ def compare_trial(
             "fingerprint": cache_fingerprint,
         },
     }
-    if args.run_ik_batch:
-        report["biobuddy_ik_batch"] = biobuddy_ik_report
+    report["biobuddy_ik_batch"] = biobuddy_ik_report
     if args.visualize and (
         args.visualize_trial is None or args.visualize_trial == bundle.name
     ):
@@ -4740,6 +4838,13 @@ def compare_trial(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare P6 Captury and Motive BVH/FBX/C3D trials."
+    )
+    parser.add_argument(
+        "--sources",
+        nargs="+",
+        choices=("captury", "motive", "biobuddy"),
+        default=["captury", "motive", "biobuddy"],
+        help="Sources to include when available, resolved independently for each trial.",
     )
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -5046,6 +5151,16 @@ def run_occlusions_only(
     for bundle in trials:
         trial_dir = args.out_dir / safe_name(bundle.name)
         trial_dir.mkdir(parents=True, exist_ok=True)
+        if bundle.motive_c3d is None:
+            write_rows(trial_dir / "motive_marker_occlusions.csv", [])
+            reports.append(
+                {
+                    "trial": bundle.name,
+                    "status": "unavailable",
+                    "reason": "no_motive_c3d",
+                }
+            )
+            continue
         rows, figure = analyze_motive_occlusions(
             bundle.motive_c3d,
             trial_dir,
@@ -5090,6 +5205,14 @@ def main() -> None:
             "--motive-model-to-c3d-axis."
         )
     discovered_trials = discover_trials(args.data_root)
+    if not any(bundle.name == args.static_trial for bundle in discovered_trials):
+        candidates = [
+            bundle.name
+            for bundle in discovered_trials
+            if bundle.name.endswith("_" + args.static_trial)
+        ]
+        if len(candidates) == 1:
+            args.static_trial = candidates[0]
     if args.list_trials:
         for bundle in discovered_trials:
             print(bundle.name)
@@ -5097,6 +5220,12 @@ def main() -> None:
     trials = list(discovered_trials)
     if args.trial:
         requested = set(args.trial)
+        available = {bundle.name for bundle in trials}
+        for name in list(requested - available):
+            matches = [trial for trial in available if trial.endswith("_" + name)]
+            if len(matches) == 1:
+                requested.remove(name)
+                requested.add(matches[0])
         trials = [bundle for bundle in trials if bundle.name in requested]
     if not trials:
         raise RuntimeError(f"No trials found in {args.data_root}.")
@@ -5112,7 +5241,9 @@ def main() -> None:
         print(f"Provenance: {provenance_path}")
         return
 
-    biobuddy_audit_evidence = load_biobuddy_audit_sidecars(args.biobuddy_biomod)
+    biobuddy_audit_evidence = load_biobuddy_audit_sidecars(
+        args.biobuddy_biomod if "biobuddy" in args.sources else None
+    )
     convention_registry = load_kinematic_conventions()
     isb_audit = build_isb_d1_d3_audit(
         convention_registry,
@@ -5140,24 +5271,20 @@ def main() -> None:
         bundle.name == args.static_trial for bundle in trials
     )
     _, trials = split_static_calibration_trial(trials, args.static_trial)
-    static_transform: SpatialCalibration | None = None
+    from comparison_workflow import ComparisonWorkflow
+
+    workflow = ComparisonWorkflow(static_bundle, args, api=sys.modules[__name__])
     reports: list[dict[str, Any]] = []
     provenance_reports: list[dict[str, Any]] = []
-    static_output_root = (
-        args.out_dir if static_requested else args.out_dir / "_static_alignment"
-    )
-    static_report, static_transform = compare_trial(
-        static_bundle, static_output_root, args, static_alignment_transform=None
-    )
-    provenance_reports.append(static_report)
     if static_requested:
+        static_report = workflow.process(static_bundle, args.out_dir)
         reports.append(static_report)
+        provenance_reports.append(static_report)
     for bundle in trials:
-        report, static_transform = compare_trial(
-            bundle, args.out_dir, args, static_alignment_transform=static_transform
-        )
+        report = workflow.process(bundle, args.out_dir)
         reports.append(report)
         provenance_reports.append(report)
+    provenance_reports.extend(workflow.static_reports)
 
     all_centre_rows: list[dict[str, Any]] = []
     all_q_rows: list[dict[str, Any]] = []

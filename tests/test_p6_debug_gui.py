@@ -120,6 +120,8 @@ class P6DebugGuiTests(unittest.TestCase):
             "model_explorer_path",
         ]
         gui.vars = {key: FakeVar("") for key in keys}
+        for source in ("captury", "motive", "biobuddy"):
+            gui.vars[f"p6_source_{source}"] = FakeVar(True)
         gui.vars["p6_no_figures"].set(False)
         gui.vars["root_offset_mode"].set("auto")
         gui.vars["c3d_angle_unit"].set("deg")

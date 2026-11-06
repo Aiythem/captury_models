@@ -91,6 +91,10 @@ GRAPH_CONFIGS = {
         "csv": "all_kinematics_q_metrics.csv",
         "groups": ("source", "q_name"),
         "metrics": (
+            "mean_rad",
+            "rom_rad",
+            "mean_native",
+            "rom_native",
             "bias_rad",
             "mae_rad",
             "rmse_rad",
@@ -152,6 +156,8 @@ EVENT_METRICS = (
     "moving",
 )
 KINEMATIC_RAD_METRICS = {
+    "mean_rad",
+    "rom_rad",
     "bias_rad",
     "mae_rad",
     "rmse_rad",
@@ -192,7 +198,9 @@ def graph_metric_columns(
 
 
 def is_rotation_q_name(q_name: str) -> bool:
-    return "_rot" in str(q_name).lower()
+    return "_rot" in str(q_name).lower() or str(q_name).lower().endswith(
+        ("_xrotation", "_yrotation", "_zrotation")
+    )
 
 
 def metric_display_name(metric: str, *, q_name: str | None = None) -> str:

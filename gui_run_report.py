@@ -36,6 +36,30 @@ def summarize_run_report(report: Mapping[str, Any]) -> str:
     trial = report.get("trial")
     if trial:
         lines.append(f"Essai: {trial}")
+    if report.get("workflow") in {"source_comparison", "motive_biobuddy"}:
+        labels = {"captury": "Captury", "motive": "Motive", "biobuddy": "BioBuddy"}
+        available = report.get("available_sources", [])
+        lines.append(
+            "Sources utilisées: "
+            + (", ".join(labels.get(s, s) for s in available) or "aucune")
+        )
+        for source, selection in report.get("source_selection", {}).items():
+            if selection.get("status") == "unavailable":
+                reasons = {
+                    "missing_recording": "enregistrement absent",
+                    "missing_selected_skeleton_export": "export du squelette absent",
+                    "missing_biobuddy_model": "modèle non fourni",
+                    "missing_motive_marker_recording_for_biobuddy_ik": "marqueurs Motive requis pour l'IK",
+                    "missing_source_in_static_calibration": "source absente de la calibration statique",
+                    "missing_compatible_kinematics": "IK compatible indisponible pour ce modèle/essai",
+                }
+                reason = selection.get("reason", "")
+                lines.append(
+                    f"{labels.get(source, source)} indisponible: {reasons.get(reason, reason)}"
+                )
+        lines.append(
+            "Courbes q natives; écarts des origines/repères segmentaires diagnostiques."
+        )
     axis = report.get("axis_conversion")
     if axis:
         if isinstance(axis, Mapping):

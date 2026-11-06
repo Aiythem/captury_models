@@ -81,6 +81,8 @@ class ComparisonProvenanceTests(unittest.TestCase):
             set(implementation),
             {
                 "comparison_batch",
+                "available_source_results",
+                "comparison_workflow",
                 "kinematic_conventions_registry",
                 "kinematic_conventions_code",
                 "kinematic_rotations_code",

@@ -930,7 +930,7 @@ endsegment
 
         self.assertAlmostEqual(score, 100.0)
 
-    def test_discover_flat_trials_matches_only_complete_c3d_pairs(self) -> None:
+    def test_discover_flat_trials_retains_missing_source_trials(self) -> None:
         assert discover_flat_trials is not None
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -955,8 +955,13 @@ endsegment
 
             trials = discover_flat_trials(root)
 
-            self.assertEqual([trial.name for trial in trials], ["Static"])
-            bundle = trials[0]
+            self.assertEqual(
+                [trial.name for trial in trials],
+                ["MissingCaptury", "MissingMotive", "Static"],
+            )
+            self.assertIsNone(trials[0].captury_c3d)
+            self.assertIsNone(trials[1].motive_c3d)
+            bundle = trials[2]
             self.assertEqual(bundle.captury_c3d.name, "Static_P6.c3d")
             self.assertEqual(bundle.captury_bvh.name, "Static_P6.bvh")
             self.assertEqual(bundle.captury_fbx.name, "Static_P6.fbx")

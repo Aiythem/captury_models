@@ -823,7 +823,12 @@ def _transformation_refs(
     trial_id: str, outputs: Mapping[str, Any], artifacts: Mapping[str, Any]
 ) -> dict[str, str | None]:
     candidates = {
-        "spatial": f"{trial_id}/spatial_calibration",
+        "spatial": f"{trial_id}/"
+        + (
+            "motive_static_alignment"
+            if "motive_static_alignment" in outputs
+            else "spatial_calibration"
+        ),
         "temporal": f"{trial_id}/temporal_synchronization",
         "quality": f"{trial_id}/metric_quality",
     }

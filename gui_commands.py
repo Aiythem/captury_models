@@ -22,7 +22,7 @@ BIOBUDDY_C3D_MODEL_SCRIPT = PROJECT_DIR / "create_biobuddy_c3d_model.py"
 BIOBUDDY_C3D_IK_SCRIPT = PROJECT_DIR / "run_biobuddy_c3d_ik.py"
 
 COMMAND_MODES = {
-    "kinematic": "Analyse Captury/Motive",
+    "kinematic": "Comparaison des sources",
     "biobuddy_c3d_model": "Modèle BioBuddy C3D",
     "biobuddy_c3d_ik": "IK BioBuddy C3D",
     "pipeline": "Pipeline BVH/FBX/C3D",
@@ -212,6 +212,16 @@ def build_p6_args(values: Mapping[str, object]) -> list[str]:
 
 
 def append_p6_common_args(args: list[str], values: Mapping[str, object]) -> None:
+    source_keys = [
+        f"p6_source_{source}" for source in ("captury", "motive", "biobuddy")
+    ]
+    if any(key in values for key in source_keys):
+        args.append("--sources")
+        args.extend(
+            source
+            for source in ("captury", "motive", "biobuddy")
+            if values.get(f"p6_source_{source}", True)
+        )
     for pattern in split_lines(values.get("p6_joint_filter", "")):
         args.extend(["--joint-filter", pattern])
     append_value(args, values, "--static-trial", "p6_static_trial")

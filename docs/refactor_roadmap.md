@@ -268,3 +268,23 @@ Tests first:
 - Add source-run tests with model extraction mocked.
 - Add expected output path/report tests for BVH-only, FBX-only and both-source
   runs.
+
+
+## Available-source selection and viewer delivery — 2026-11-06
+
+The GUI source checkboxes and CLI `--sources` share per-trial availability and
+static-calibration orchestration. Paired recordings use the established paired
+processor; available-source results retain native coordinates and explicit
+registration limits. Canonical CoR edges and source-aware viewer refresh support
+partial recordings. Compatible saved BioBuddy IK can be reused without invoking
+the solver. No joint-angle conventions, templates or solver bounds change here.
+
+Tests preceded extraction (18 tests: 3 failures, 15 errors). Independent review
+required canonical chain edges and unconditional publication of cached BioBuddy
+IK metadata in paired reports; both have regression coverage. The isolated branch
+passes 380 unittest cases (3 desktop tests skipped in the headless suite),
+`py_compile` and `git diff --check`. Actual Tk checks exercise source toggles,
+empty selection, command generation, result refresh and missing-source reporting.
+A P16 squat CLI smoke completes with Motive available and BioBuddy explicitly
+unavailable when no compatible IK cache exists; data and outputs remain external
+to the commit. Viewer navigation is also checked with desktop tests enabled.
