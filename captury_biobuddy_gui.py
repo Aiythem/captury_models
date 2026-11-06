@@ -58,6 +58,7 @@ from gui_commands import (
     split_extra_labels,
     split_lines,
 )
+from gui_layout import ScrollableSection, fit_window
 from gui_graphs import (
     EVENT_METRICS,
     GRAPH_CONFIGS,
@@ -538,18 +539,22 @@ class CapturyBioBuddyGui(tk.Tk):
         self.trial_combobox.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         body = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
+        self.main_body = body
         body.grid(row=1, column=0, sticky="nsew")
 
         left = ttk.Frame(body, padding=(0, 0, 10, 0))
-        right = ttk.Frame(body)
+        right_viewport = ScrollableSection(body, padding=0)
+        right = right_viewport.content
+        self.viewer_panel = right_viewport
         body.add(left, weight=3)
-        body.add(right, weight=2)
+        body.add(right_viewport, weight=2)
 
-        left.rowconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
-        notebook = ttk.Notebook(left)
+        ttk.Style(self).layout("Sections.TNotebook.Tab", [])
+        notebook = ttk.Notebook(left, style="Sections.TNotebook")
         self.main_notebook = notebook
-        notebook.grid(row=0, column=0, sticky="nsew")
+        notebook.grid(row=1, column=0, sticky="nsew")
 
         self._build_loading_matching_tab(notebook)
         self._build_biobuddy_c3d_model_tab(notebook)
@@ -565,19 +570,59 @@ class CapturyBioBuddyGui(tk.Tk):
         self._build_critical_methods_tab(notebook)
         self._build_advanced_tab(notebook)
 
+        navigation = ttk.Frame(left)
+        navigation.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        navigation.columnconfigure(1, weight=1)
+        ttk.Label(navigation, text="Section").grid(row=0, column=0, padx=(0, 8))
+        self.section_selector = ttk.Combobox(
+            navigation,
+            values=[notebook.tab(tab, "text") for tab in notebook.tabs()],
+            state="readonly",
+            width=20,
+        )
+        self.section_selector.grid(row=0, column=1, sticky="ew")
+        self.section_selector.current(0)
+        self.section_selector.bind(
+            "<<ComboboxSelected>>",
+            lambda event: notebook.select(self.section_selector.current()),
+        )
+        notebook.bind(
+            "<<NotebookTabChanged>>",
+            lambda event: self.section_selector.current(notebook.index("current")),
+        )
+        self.viewer_visible = tk.BooleanVar(self, value=True)
+        ttk.Checkbutton(
+            navigation,
+            text="Visu 3D",
+            variable=self.viewer_visible,
+            command=self._toggle_viewer_panel,
+        ).grid(row=0, column=2, padx=(8, 0))
+
+        def initial_split(event):
+            if event.width > 100:
+                body.sashpos(0, int(event.width * 0.64))
+                body.unbind("<Configure>", split_binding)
+
+        split_binding = body.bind("<Configure>", initial_split, add="+")
+
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
-        self._build_actions(right)
         self._build_embedded_trial_viewer(right)
         self._build_footer_tools(root)
         self._refresh_trial_inventory()
         self._refresh_results()
 
+    def _toggle_viewer_panel(self):
+        if self.viewer_visible.get():
+            self.main_body.add(self.viewer_panel, weight=2)
+            self.main_body.sashpos(0, int(self.main_body.winfo_width() * 0.64))
+        else:
+            self.main_body.forget(self.viewer_panel)
+
     def _tab(self, notebook: ttk.Notebook, title: str) -> ttk.Frame:
-        frame = ttk.Frame(notebook, padding=12)
-        frame.columnconfigure(0, weight=1)
-        notebook.add(frame, text=title)
-        return frame
+        viewport = ScrollableSection(notebook)
+        notebook.add(viewport, text=title)
+        return viewport.content
 
     def _analysis_action_row(self, parent: ttk.Widget, row: int) -> None:
         actions = ttk.Frame(parent)
@@ -1157,18 +1202,16 @@ class CapturyBioBuddyGui(tk.Tk):
         self._path_row(
             panel, 2, "Événements revus CSV", "p6_gait_events_csv", [("CSV", "*.csv")]
         )
-        self.cycle_help = ttk.Label(panel, wraplength=850)
+        self.cycle_help = ttk.Label(panel, wraplength=600)
         self.cycle_help.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=4)
         settings = ttk.Frame(panel)
         settings.grid(row=5, column=0, columnspan=3, sticky="ew")
         settings.grid_remove()
-
         def toggle_settings():
             if settings.winfo_manager():
                 settings.grid_remove()
             else:
                 settings.grid()
-
         ttk.Button(
             panel,
             text="Paramètres de détection et normalisation…",
@@ -1197,6 +1240,7 @@ class CapturyBioBuddyGui(tk.Tk):
             for row, (label, variable) in enumerate(entries):
                 self._entry_row(group, row, label, variable)
         actions = ttk.Frame(tab)
+        actions.columnconfigure((0, 1), weight=1)
         actions.grid(row=1, column=0, sticky="ew", pady=6)
         self._register_analysis_button(
             ttk.Button(
@@ -1204,18 +1248,18 @@ class CapturyBioBuddyGui(tk.Tk):
                 text="Détecter et normaliser",
                 command=self._run_selected_gait_analysis,
             )
-        ).pack(side=tk.LEFT)
+        ).grid(row=0, column=0, sticky="ew", padx=4, pady=3)
         ttk.Button(
             actions,
             text="Exporter les CSV sélectionnés…",
             command=self._export_gait_csvs,
-        ).pack(side=tk.LEFT, padx=8)
+        ).grid(row=0, column=1, sticky="ew", padx=4, pady=3)
         ttk.Button(
             actions, text="Actualiser les cycles", command=self._refresh_cycle_review
-        ).pack(side=tk.LEFT)
+        ).grid(row=1, column=0, sticky="ew", padx=4, pady=3)
         ttk.Button(
             actions, text="Ouvrir les 3 figures", command=self._open_cycle_mean_window
-        ).pack(side=tk.LEFT, padx=8)
+        ).grid(row=1, column=1, sticky="ew", padx=4, pady=3)
         review = ttk.LabelFrame(
             tab, text="Cocher les cycles à conserver dans les courbes et les CSV"
         )
@@ -1264,7 +1308,6 @@ class CapturyBioBuddyGui(tk.Tk):
 
     def _open_cycle_mean_window(self):
         from gui_cycle_means import JOINT_LABELS, draw_joint_figures
-
         if Figure is None or FigureCanvasTkAgg is None:
             return
         directory = self._cycle_trial_dir()
@@ -1279,7 +1322,6 @@ class CapturyBioBuddyGui(tk.Tk):
         windows = {}
         figures = {}
         canvases = {}
-
         def refresh():
             current, exclusions, _ = cycle_selection(directory)
             try:
@@ -1289,16 +1331,19 @@ class CapturyBioBuddyGui(tk.Tk):
                         canvas.draw_idle()
             except (ValueError, OSError, KeyError) as exc:
                 messagebox.showerror("Moyennes indisponibles", str(exc), parent=self)
-
         for index, (joint, label) in enumerate(JOINT_LABELS.items()):
             window = tk.Toplevel(self)
             window.title(f"{directory.name} — {label} — jambe droite")
-            window.geometry(f"1350x520+{40+index*35}+{60+index*40}")
+            fit_window(window, 1350, 540, offset=index * 30)
+            viewport = ScrollableSection(window, padding=0)
+            viewport.pack(fill="both", expand=True)
+            plot_parent = viewport.content
             figure = Figure(figsize=(13.5, 5), dpi=100)
-            canvas = FigureCanvasTkAgg(figure, master=window)
+            canvas = FigureCanvasTkAgg(figure, master=plot_parent)
             ttk.Button(
-                window, text="Actualiser avec les cycles cochés", command=refresh
+                plot_parent, text="Actualiser avec les cycles cochés", command=refresh
             ).pack(anchor="w", padx=8, pady=6)
+            canvas.get_tk_widget().configure(width=900, height=400)
             canvas.get_tk_widget().pack(fill="both", expand=True)
             window.figure = figure
             windows[joint] = window
@@ -1314,7 +1359,6 @@ class CapturyBioBuddyGui(tk.Tk):
 
     def _show_cycle_joint_figures(self, panel, directory, report, excluded, filters):
         from gui_cycle_means import JOINT_LABELS, draw_joint_figures
-
         if "mean_notebook" not in panel:
             notebook = ttk.Notebook(panel["canvas"].get_tk_widget().master)
             figures = {}
@@ -1323,7 +1367,7 @@ class CapturyBioBuddyGui(tk.Tk):
             for joint, label in JOINT_LABELS.items():
                 tab = ttk.Frame(notebook)
                 notebook.add(tab, text=label)
-                figure = Figure(figsize=(10, 3.5), dpi=100)
+                figure = Figure(figsize=(10, 4), dpi=100)
                 canvas = FigureCanvasTkAgg(figure, master=tab)
                 canvas.get_tk_widget().pack(fill="both", expand=True)
                 figures[joint] = figure
@@ -2227,6 +2271,10 @@ class CapturyBioBuddyGui(tk.Tk):
         ttk.Button(footer, text="Log", command=self._open_log_window).grid(
             row=0, column=1, sticky="w"
         )
+        execution = ttk.Frame(footer)
+        execution.grid(row=0, column=2, sticky="ew", padx=(12, 0))
+        execution.columnconfigure(0, weight=1)
+        self._build_actions(execution)
 
     def _build_log_panel(self, parent: ttk.Frame) -> None:
         panel = ttk.LabelFrame(parent, text="Log")
@@ -2280,7 +2328,7 @@ class CapturyBioBuddyGui(tk.Tk):
         )
         panel = ttk.LabelFrame(parent, text=f"Graphiques - {title}")
         panel.grid(row=row, column=0, sticky="nsew", pady=(12, 0))
-        panel.rowconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1, minsize=340)
         panel.columnconfigure(1, weight=1)
 
         tree_frame = ttk.Frame(panel)

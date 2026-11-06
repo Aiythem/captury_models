@@ -839,3 +839,26 @@ Interpolation coverage and gap limits still apply. Unavailable curves retain 101
 NaN rows with their status. Raw-time CSVs preserve the original sampling.
 `raw_value`, `sign_multiplier`, the model fingerprint and reference are retained
 for traceability, alongside the included/excluded cycle IDs in the export report.
+
+## Resizing the GUI
+
+Use the **Section** selector to access every analysis section regardless of window
+width. Sections expand with the window; horizontal and vertical scrollbars keep
+controls, tables and plots reachable when their minimum readable size exceeds the
+available space. The cycle-normalization graph retains a usable height instead of
+collapsing below the detection and cycle-selection controls. The cycle action
+buttons occupy two rows.
+
+Uncheck **Visu 3D** to give the analysis section the full window width. Run, Stop
+and status remain visible in the footer. The divider still lets you adjust the
+space shared with the preview. Separate joint figures open within the screen and
+resize with their windows; scrollbars preserve readable plots in smaller windows.
+Each joint retains its three horizontal sagittal, frontal and transverse panels,
+with automatic spacing for titles, axes and legends. These layout changes do not
+change cycle selection, angle calculations or the 101-point CSV export.
+
+Desktop resize regression (requires a graphical session):
+
+```bash
+CAPTURY_GUI_SMOKE=1 python -m unittest tests.test_gui_responsive_layout -v
+```
