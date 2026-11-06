@@ -124,6 +124,14 @@ from motive57_c3d_mapping import (
     save_motive57_mapping,
 )
 from mocap_coordinate_frames import resolve_system_coordinate_frames
+from gui_gait import (
+    copy_gait_exports,
+    draw_gait_cycles,
+    cycle_selection,
+    save_cycle_selection,
+    cycle_options,
+    selected_cycle_keys,
+)
 
 try:
     import pandas as pd
@@ -427,6 +435,18 @@ class CapturyBioBuddyGui(tk.Tk):
             "p6_joint_filter": "",
             "p6_joint_centre_reference": "biobuddy",
             "p6_auto_analyze": True,
+            "p6_normalize_gait": True,
+            "p6_cycle_task": "gait",
+            "p6_cycle_detection": "automatic",
+            "p6_squat_standing_deg": "15",
+            "p6_squat_peak_deg": "40",
+            "p6_jump_height_mm": "30",
+            "p6_gait_events_csv": "",
+            "p6_gait_min_cycle_s": "0.4",
+            "p6_gait_max_cycle_s": "2.5",
+            "p6_gait_max_gap_s": "0.05",
+            "p6_gait_velocity_threshold_m_s": "0.5",
+            "p6_gait_filter_hz": "7.0",
             "p6_no_figures": True,
             "p6_no_cache": False,
             "p6_model_source": "bvh",
@@ -540,6 +560,7 @@ class CapturyBioBuddyGui(tk.Tk):
         self._build_joint_centres_tab(notebook)
         self._build_skin_markers_tab(notebook)
         self._build_kinematics_compare_tab(notebook)
+        self._build_gait_tab(notebook)
         self._build_visualization_tab(notebook)
         self._build_critical_methods_tab(notebook)
         self._build_advanced_tab(notebook)
@@ -1110,6 +1131,347 @@ class CapturyBioBuddyGui(tk.Tk):
         self._entry_row(panel, 5, "Max frames IK batch", "p6_ik_max_frames")
         self._analysis_action_row(tab, 1)
         self._build_graph_panel(tab, 2, "kinematics")
+
+    def _build_gait_tab(self, notebook: ttk.Notebook) -> None:
+        tab = self._tab(notebook, "Cycle normalization")
+        tab.rowconfigure(3, weight=1)
+        panel = ttk.LabelFrame(tab, text="Tâche et détection des cycles")
+        panel.grid(row=0, column=0, sticky="ew")
+        panel.columnconfigure(1, weight=1)
+        ttk.Label(panel, text="Tâche").grid(row=0, column=0, sticky="w")
+        task = ttk.Combobox(
+            panel,
+            textvariable=self.vars["p6_cycle_task"],
+            values=("gait", "squat", "jump"),
+            state="readonly",
+        )
+        task.grid(row=0, column=1, sticky="ew")
+        task.bind("<<ComboboxSelected>>", self._cycle_task_changed)
+        ttk.Label(panel, text="Détection").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(
+            panel,
+            textvariable=self.vars["p6_cycle_detection"],
+            values=("automatic", "reviewed"),
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew")
+        self._path_row(
+            panel, 2, "Événements revus CSV", "p6_gait_events_csv", [("CSV", "*.csv")]
+        )
+        self.cycle_help = ttk.Label(panel, wraplength=850)
+        self.cycle_help.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=4)
+        settings = ttk.Frame(panel)
+        settings.grid(row=5, column=0, columnspan=3, sticky="ew")
+        settings.grid_remove()
+
+        def toggle_settings():
+            if settings.winfo_manager():
+                settings.grid_remove()
+            else:
+                settings.grid()
+
+        ttk.Button(
+            panel,
+            text="Paramètres de détection et normalisation…",
+            command=toggle_settings,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=4)
+        for column, entries in enumerate(
+            (
+                (
+                    ("Cycle min. (s)", "p6_gait_min_cycle_s"),
+                    ("Cycle max. (s)", "p6_gait_max_cycle_s"),
+                    ("Points par cycle", "p6_phase_normalization_points"),
+                    ("Lacune max. (s)", "p6_gait_max_gap_s"),
+                ),
+                (
+                    ("Marche : seuil vitesse (m/s)", "p6_gait_velocity_threshold_m_s"),
+                    ("Squat : seuil debout (°)", "p6_squat_standing_deg"),
+                    ("Squat : flexion minimale (°)", "p6_squat_peak_deg"),
+                    ("Saut : seuil hauteur pieds (mm)", "p6_jump_height_mm"),
+                ),
+            )
+        ):
+            group = ttk.Frame(settings)
+            group.grid(row=0, column=column, sticky="ew")
+            settings.columnconfigure(column, weight=1)
+            group.columnconfigure(1, weight=1)
+            for row, (label, variable) in enumerate(entries):
+                self._entry_row(group, row, label, variable)
+        actions = ttk.Frame(tab)
+        actions.grid(row=1, column=0, sticky="ew", pady=6)
+        self._register_analysis_button(
+            ttk.Button(
+                actions,
+                text="Détecter et normaliser",
+                command=self._run_selected_gait_analysis,
+            )
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            actions,
+            text="Exporter les CSV sélectionnés…",
+            command=self._export_gait_csvs,
+        ).pack(side=tk.LEFT, padx=8)
+        ttk.Button(
+            actions, text="Actualiser les cycles", command=self._refresh_cycle_review
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            actions, text="Ouvrir les 3 figures", command=self._open_cycle_mean_window
+        ).pack(side=tk.LEFT, padx=8)
+        review = ttk.LabelFrame(
+            tab, text="Cocher les cycles à conserver dans les courbes et les CSV"
+        )
+        review.grid(row=2, column=0, sticky="ew")
+        self.cycle_review = ttk.Frame(review)
+        self.cycle_review.pack(fill="x", expand=True)
+        self.cycle_side_frames = {}
+        self.cycle_check_vars = {}
+        for column, (side, label) in enumerate(
+            (("left", "Gauche — Left"), ("right", "Droite — Right"))
+        ):
+            group = ttk.LabelFrame(self.cycle_review, text=label)
+            group.grid(row=0, column=column, sticky="nsew", padx=4)
+            self.cycle_review.columnconfigure(column, weight=1)
+            canvas = tk.Canvas(group, height=90, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(group, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            content = ttk.Frame(canvas)
+            item = canvas.create_window((0, 0), window=content, anchor="nw")
+            content.bind(
+                "<Configure>",
+                lambda event, c=canvas: c.configure(scrollregion=c.bbox("all")),
+            )
+            canvas.bind(
+                "<Configure>",
+                lambda event, c=canvas, i=item: c.itemconfigure(i, width=event.width),
+            )
+            self.cycle_side_frames[side] = content
+        actions_review = ttk.Frame(review)
+        actions_review.pack(fill="x")
+        ttk.Button(
+            actions_review,
+            text="Tout cocher",
+            command=lambda: self._set_all_cycles(True),
+        ).pack(side="left")
+        ttk.Button(
+            actions_review,
+            text="Tout décocher",
+            command=lambda: self._set_all_cycles(False),
+        ).pack(side="left")
+        self.cycle_review_dir = None
+        self._cycle_task_changed(reset_limits=False)
+        self._build_graph_panel(tab, 3, "gait")
+
+    def _open_cycle_mean_window(self):
+        from gui_cycle_means import JOINT_LABELS, draw_joint_figures
+
+        if Figure is None or FigureCanvasTkAgg is None:
+            return
+        directory = self._cycle_trial_dir()
+        report, excluded, _ = cycle_selection(directory)
+        if not report or report.get("task", "gait") != str(
+            self.vars["p6_cycle_task"].get()
+        ):
+            messagebox.showinfo(
+                "Moyennes", "Normaliser la tâche sélectionnée avant la comparaison."
+            )
+            return
+        windows = {}
+        figures = {}
+        canvases = {}
+
+        def refresh():
+            current, exclusions, _ = cycle_selection(directory)
+            try:
+                draw_joint_figures(figures, directory, current, exclusions)
+                for joint, canvas in canvases.items():
+                    if windows[joint].winfo_exists():
+                        canvas.draw_idle()
+            except (ValueError, OSError, KeyError) as exc:
+                messagebox.showerror("Moyennes indisponibles", str(exc), parent=self)
+
+        for index, (joint, label) in enumerate(JOINT_LABELS.items()):
+            window = tk.Toplevel(self)
+            window.title(f"{directory.name} — {label} — jambe droite")
+            window.geometry(f"1350x520+{40+index*35}+{60+index*40}")
+            figure = Figure(figsize=(13.5, 5), dpi=100)
+            canvas = FigureCanvasTkAgg(figure, master=window)
+            ttk.Button(
+                window, text="Actualiser avec les cycles cochés", command=refresh
+            ).pack(anchor="w", padx=8, pady=6)
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+            window.figure = figure
+            windows[joint] = window
+            figures[joint] = figure
+            canvases[joint] = canvas
+        refresh()
+        return windows
+
+    def _hide_cycle_joint_figures(self, panel):
+        if "mean_notebook" in panel:
+            panel["mean_notebook"].grid_remove()
+            panel["canvas"].get_tk_widget().grid()
+
+    def _show_cycle_joint_figures(self, panel, directory, report, excluded, filters):
+        from gui_cycle_means import JOINT_LABELS, draw_joint_figures
+
+        if "mean_notebook" not in panel:
+            notebook = ttk.Notebook(panel["canvas"].get_tk_widget().master)
+            figures = {}
+            canvases = {}
+            tabs = {}
+            for joint, label in JOINT_LABELS.items():
+                tab = ttk.Frame(notebook)
+                notebook.add(tab, text=label)
+                figure = Figure(figsize=(10, 3.5), dpi=100)
+                canvas = FigureCanvasTkAgg(figure, master=tab)
+                canvas.get_tk_widget().pack(fill="both", expand=True)
+                figures[joint] = figure
+                canvases[joint] = canvas
+                tabs[joint] = tab
+            panel.update(
+                mean_notebook=notebook,
+                mean_figures=figures,
+                mean_canvases=canvases,
+                mean_tabs=tabs,
+            )
+        draw_joint_figures(
+            panel["mean_figures"],
+            directory,
+            report,
+            excluded,
+            side=str(filters.get("side", "right")),
+        )
+        panel["canvas"].get_tk_widget().grid_remove()
+        panel["mean_notebook"].grid(row=0, column=0, sticky="nsew")
+        if filters.get("joint") in panel["mean_tabs"]:
+            panel["mean_notebook"].select(panel["mean_tabs"][filters["joint"]])
+        for canvas in panel["mean_canvases"].values():
+            canvas.draw_idle()
+
+    def _cycle_task_changed(self, event=None, *, reset_limits=True):
+        task = str(self.vars["p6_cycle_task"].get())
+        help_text = {
+            "gait": "Ghoussayni : contact au contact suivant du même pied. CSV revu : trial,side,time_s.",
+            "squat": "Debout → flexion maximale → debout. Angle géométrique des deux genoux Motive. CSV revu : trial,start_s,end_s.",
+            "jump": "Décollage → réception estimés par la hauteur des deux pieds. Vérifier les limites ; pas de validation plateforme de force. CSV revu : trial,start_s,end_s.",
+        }
+        self.cycle_help.configure(
+            text=help_text[task]
+            + " Les CSV sont créés uniquement avec le bouton Exporter. Signes fixes selon la référence Fukuchi et al. (2018), appliqués aux courbes et CSV ; composantes non vérifiées conservées."
+        )
+        if reset_limits:
+            self.vars["p6_gait_min_cycle_s"].set("0.1" if task == "jump" else "0.4")
+            self.vars["p6_gait_max_cycle_s"].set("10" if task == "squat" else "2.5")
+        if hasattr(self, "cycle_review"):
+            self._refresh_cycle_review()
+
+    def _cycle_trial_dir(self):
+        selected = str(self.vars["selected_trial"].get()).strip()
+        return self._graph_output_root() / safe_trial_dir_name(selected)
+
+    def _refresh_cycle_review(self):
+        if not hasattr(self, "cycle_review"):
+            return
+        directory = self._cycle_trial_dir()
+        report, excluded, signature = cycle_selection(directory)
+        for frame in self.cycle_side_frames.values():
+            for widget in frame.winfo_children():
+                widget.destroy()
+        self.cycle_check_vars = {}
+        self.cycle_review_dir = directory
+        self.cycle_review_signature = signature
+        if report.get("task", "gait") != str(self.vars["p6_cycle_task"].get()):
+            return
+        selected = selected_cycle_keys(report, excluded)
+        for cycle in cycle_options(report):
+            key = cycle["selection_key"]
+            variable = tk.BooleanVar(self, value=key in selected)
+            self.cycle_check_vars[key] = variable
+            text = f"Cycle {cycle['cycle_index']}   {cycle['start_s']:.3f}–{cycle['end_s']:.3f} s"
+            if "peak_s" in cycle:
+                text += f"   pic {cycle['peak_s']:.3f} s"
+            ttk.Checkbutton(
+                self.cycle_side_frames[cycle["side"]],
+                text=text,
+                variable=variable,
+                command=self._store_cycle_review,
+            ).pack(anchor="w", padx=6, pady=2)
+        for side, frame in self.cycle_side_frames.items():
+            if not any(key.startswith(side + "::") for key in self.cycle_check_vars):
+                ttk.Label(frame, text="Aucun cycle détecté").pack(anchor="w", padx=6)
+
+    def _store_cycle_review(self):
+        directory = self._cycle_trial_dir()
+        _, _, signature = cycle_selection(directory)
+        if (
+            directory != self.cycle_review_dir
+            or signature != self.cycle_review_signature
+        ):
+            self._refresh_cycle_review()
+            return
+        excluded = [key for key, var in self.cycle_check_vars.items() if not var.get()]
+        save_cycle_selection(directory, excluded, signature)
+        self._draw_selected_graph("gait")
+
+    def _set_all_cycles(self, include):
+        for variable in self.cycle_check_vars.values():
+            variable.set(include)
+        if self.cycle_check_vars:
+            self._store_cycle_review()
+
+    def _run_selected_gait_analysis(self) -> None:
+        selected = str(self.vars["selected_trial"].get()).strip()
+        if not selected or selected == ALL_TRIALS_LABEL:
+            messagebox.showinfo("Essai", "Sélectionner un essai à normaliser.")
+            return
+        if self.process is not None or not self._validate_p6_analysis():
+            return
+        values = self._var_values()
+        values["p6_normalize_gait"] = True
+        if values.get("p6_cycle_detection") == "automatic":
+            values["p6_gait_events_csv"] = ""
+        elif not str(values.get("p6_gait_events_csv", "")).strip():
+            messagebox.showerror("Événements", "Choisir le CSV des événements revus.")
+            return
+        self._run_args(
+            build_p6_auto_analysis_args(values, selected), command_mode="kinematic"
+        )
+
+    def _export_gait_csvs(self) -> None:
+        from tkinter import simpledialog
+
+        trial_dir = self._cycle_trial_dir()
+        report, excluded, _ = cycle_selection(trial_dir)
+        task = str(self.vars["p6_cycle_task"].get())
+        if not report or report.get("task", "gait") != task:
+            messagebox.showinfo(
+                "Export",
+                "Normaliser cet essai pour la tâche sélectionnée avant l'export.",
+            )
+            return
+        if not selected_cycle_keys(report, excluded):
+            messagebox.showinfo("Export", "Inclure au moins un cycle avant l'export.")
+            return
+        prefix = simpledialog.askstring(
+            "Nom des CSV",
+            "Préfixe des fichiers CSV (les suffixes hanche/genou/cheville sont ajoutés) :",
+            initialvalue=f"{trial_dir.name}_{task}",
+            parent=self,
+        )
+        if prefix is None:
+            return
+        destination = filedialog.askdirectory(
+            title="Dossier d'export des cycles sélectionnés"
+        )
+        if destination:
+            try:
+                files = copy_gait_exports(trial_dir, destination, prefix=prefix)
+                self.status_var.set(
+                    f"Export terminé : {len(files)-1} CSV + rapport dans {destination}"
+                )
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Export impossible", str(exc))
 
     def _build_visualization_tab(self, notebook: ttk.Notebook) -> None:
         tab = self._tab(notebook, "Visualisation")
@@ -2610,6 +2972,8 @@ class CapturyBioBuddyGui(tk.Tk):
         if not path.exists() or path.stat().st_size == 0:
             return pd.DataFrame()
         try:
+            if path.suffix == ".npz":
+                return read_table_npz(path)
             return pd.read_csv(path)
         except pd.errors.EmptyDataError:
             return pd.DataFrame()
@@ -2705,6 +3069,8 @@ class CapturyBioBuddyGui(tk.Tk):
         panel = self.graph_panels.get(graph_kind)
         if not panel:
             return
+        if graph_kind == "gait":
+            self._refresh_cycle_review()
         tree = panel["tree"]
         assert isinstance(tree, ttk.Treeview)
         tree.delete(*tree.get_children())
@@ -2718,6 +3084,16 @@ class CapturyBioBuddyGui(tk.Tk):
             tree.selection_set(first_payload_node)
             tree.focus(first_payload_node)
             self._draw_selected_graph(graph_kind)
+        elif graph_kind == "gait" and "axes" in panel:
+            self._hide_cycle_joint_figures(panel)
+            if panel.pop("mean_layout", False):
+                panel["figure"].clear()
+                panel["axes"] = panel["figure"].add_subplot(111)
+            panel["axes"].clear()
+            panel["axes"].set_title(
+                "Aucun cycle complet: vérifier contacts et fenêtre."
+            )
+            panel["canvas"].draw_idle()
 
     def _first_graph_payload_node(
         self, tree: ttk.Treeview, graph_kind: str
@@ -2735,11 +3111,27 @@ class CapturyBioBuddyGui(tk.Tk):
         config = GRAPH_CONFIGS[graph_kind]
         path = self._graph_csv_path(graph_kind)
         if not path.exists():
-            tree.insert("", tk.END, text=f"CSV absent: {path.name}")
+            tree.insert(
+                "",
+                tk.END,
+                text=(
+                    "Résultats absents : lancer la normalisation."
+                    if graph_kind == "gait"
+                    else f"CSV absent: {path.name}"
+                ),
+            )
             return
         dataframe = self._read_csv_or_empty(path)
         if dataframe.empty:
-            tree.insert("", tk.END, text=f"CSV vide: {path.name}")
+            tree.insert(
+                "",
+                tk.END,
+                text=(
+                    "Aucun cycle complet: vérifier contacts et fenêtre."
+                    if graph_kind == "gait"
+                    else f"CSV vide: {path.name}"
+                ),
+            )
             return
         metrics = graph_metric_columns(dataframe, config["metrics"])
         if not metrics:
@@ -2752,6 +3144,28 @@ class CapturyBioBuddyGui(tk.Tk):
             if trial_df.empty:
                 continue
             trial_id = tree.insert("", tk.END, text=trial, open=True)
+            if graph_kind == "gait":
+                mean_id = self._insert_graph_node(
+                    tree,
+                    graph_kind,
+                    trial_id,
+                    "Moyennes sélectionnées — jambe droite",
+                    {"trial": trial, "side": "right"},
+                    metric="selected_leg_mean",
+                )
+                for joint, label in (
+                    ("hip", "Hip"),
+                    ("knee", "Knee"),
+                    ("ankle", "Ankle"),
+                ):
+                    self._insert_graph_node(
+                        tree,
+                        graph_kind,
+                        mean_id,
+                        label,
+                        {"trial": trial, "side": "right", "joint": joint},
+                        metric="selected_leg_mean",
+                    )
             for metric in metrics:
                 metric_id = self._insert_graph_node(
                     tree,
@@ -3009,6 +3423,27 @@ class CapturyBioBuddyGui(tk.Tk):
         if pd is None:
             return
         panel = self.graph_panels[graph_kind]
+        if graph_kind == "gait" and payloads[0].get("metric") == "selected_leg_mean":
+            filters = payloads[0]["filters"]
+            directory = self._graph_output_root() / safe_trial_dir_name(
+                str(filters["trial"])
+            )
+            report, excluded, _ = cycle_selection(directory)
+            if report.get("task", "gait") == str(self.vars["p6_cycle_task"].get()):
+                try:
+                    self._show_cycle_joint_figures(
+                        panel, directory, report, excluded, filters
+                    )
+                    return
+                except (ValueError, OSError, KeyError) as exc:
+                    self._hide_cycle_joint_figures(panel)
+                    panel["figure"].clear()
+                    panel["axes"] = panel["figure"].add_subplot(111)
+                    panel["axes"].set_title(f"Moyenne indisponible : {exc}")
+                    panel["canvas"].draw_idle()
+                    return
+        if graph_kind == "gait" and "mean_notebook" in panel:
+            self._hide_cycle_joint_figures(panel)
         axes = panel["axes"]
         canvas = panel["canvas"]
         config = GRAPH_CONFIGS[graph_kind]
@@ -3020,6 +3455,36 @@ class CapturyBioBuddyGui(tk.Tk):
             return
         if graph_kind == "kinematics":
             self._draw_kinematics_graph(payloads, dataframe)
+            return
+        if graph_kind == "gait":
+            filters = dict(payloads[0]["filters"])
+            trial = str(filters.get("trial", ""))
+            path = (
+                self._graph_output_root()
+                / safe_trial_dir_name(trial)
+                / "gait_cycle_timeseries.npz"
+            )
+            if path.is_file():
+                report, excluded, _ = cycle_selection(path.parent)
+                if report.get("task", "gait") != str(self.vars["p6_cycle_task"].get()):
+                    axes.clear()
+                    axes.set_title(
+                        "Normaliser la tâche sélectionnée pour afficher ses cycles"
+                    )
+                else:
+                    draw_gait_cycles(
+                        axes,
+                        read_table_npz(path),
+                        filters,
+                        excluded_cycle_ids=excluded,
+                        task=report.get("task", "gait"),
+                        trial_dir=path.parent,
+                    )
+            else:
+                axes.clear()
+                axes.set_title(f"Séries de cycles absentes: {trial}")
+            panel["figure"].tight_layout()
+            canvas.draw_idle()
             return
         if graph_kind == "centres" and self._draw_joint_centre_graph(payloads):
             return
@@ -3903,6 +4368,13 @@ class CapturyBioBuddyGui(tk.Tk):
             "p6_manual_lag_s",
             "p6_max_lag_s",
             "p6_phase_normalization_points",
+            "p6_normalize_gait",
+            "p6_gait_events_csv",
+            "p6_gait_min_cycle_s",
+            "p6_gait_max_cycle_s",
+            "p6_gait_max_gap_s",
+            "p6_gait_velocity_threshold_m_s",
+            "p6_gait_filter_hz",
             "p6_cut_mode",
             "p6_time_start",
             "p6_time_end",

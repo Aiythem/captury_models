@@ -15,6 +15,12 @@ except Exception:  # pragma: no cover - optional plotting dependency
     pd = None
 
 GRAPH_CONFIGS = {
+    "gait": {
+        "csv": "all_gait_cycle_metrics.npz",
+        "groups": ("source", "side", "joint", "q_name", "cycle_id"),
+        "metrics": ("mean_value",),
+        "title": "Cycle normalization 0–100 %",
+    },
     "occlusions": {
         "csv": "all_motive_marker_occlusions.csv",
         "groups": ("marker",),

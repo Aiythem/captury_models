@@ -222,6 +222,24 @@ def append_p6_common_args(args: list[str], values: Mapping[str, object]) -> None
             for source in ("captury", "motive", "biobuddy")
             if values.get(f"p6_source_{source}", True)
         )
+    append_flag(args, values, "--normalize-gait", "p6_normalize_gait")
+    for option, variable in (
+        ("--cycle-task", "p6_cycle_task"),
+        ("--cycle-detection", "p6_cycle_detection"),
+        ("--squat-standing-deg", "p6_squat_standing_deg"),
+        ("--squat-peak-deg", "p6_squat_peak_deg"),
+        ("--jump-height-mm", "p6_jump_height_mm"),
+    ):
+        append_value(args, values, option, variable)
+    if value_of(values, "p6_cycle_detection") != "automatic":
+        append_value(args, values, "--gait-events-csv", "p6_gait_events_csv")
+    append_value(args, values, "--gait-min-cycle-s", "p6_gait_min_cycle_s")
+    append_value(args, values, "--gait-max-cycle-s", "p6_gait_max_cycle_s")
+    append_value(args, values, "--gait-max-gap-s", "p6_gait_max_gap_s")
+    append_value(
+        args, values, "--gait-velocity-threshold-m-s", "p6_gait_velocity_threshold_m_s"
+    )
+    append_value(args, values, "--gait-filter-hz", "p6_gait_filter_hz")
     for pattern in split_lines(values.get("p6_joint_filter", "")):
         args.extend(["--joint-filter", pattern])
     append_value(args, values, "--static-trial", "p6_static_trial")

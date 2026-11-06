@@ -41,6 +41,9 @@ CURVE_FILTER_KEYS = (
     "family",
     "reference",
     "source",
+    "side",
+    "cycle_id",
+    "unit",
     "system",
     "joint",
     "segment",
@@ -694,6 +697,9 @@ def _table_curve_recipes(
                 "filter_combinations": [dict(value) for value in combinations],
                 "x_unit": _column_unit(x_key),
                 "y_unit": _column_unit(y_key),
+                "y_unit_column": (
+                    "unit" if y_key == "value" and "unit" in column_arrays else None
+                ),
                 "preprocessing_chain": [
                     "read_table_npz",
                     "filter_rows",
@@ -1113,11 +1119,16 @@ def load_curve_from_manifest(
                 if recipe.get("component_axis") == 0:
                     y = y[int(recipe["component_index"])]
                 loaded_filters = {}
+    y_unit = recipe["y_unit"]
+    if recipe.get("y_unit_column"):
+        unit_values = loaded_filters.get(recipe["y_unit_column"], [])
+        units = set(np.asarray(unit_values).astype(str).reshape(-1))
+        y_unit = next(iter(units)) if len(units) == 1 else "mixed"
     return {
         "curve_id": curve_id,
         "x": x,
         "y": y,
         "filters": loaded_filters,
         "x_unit": recipe["x_unit"],
-        "y_unit": recipe["y_unit"],
+        "y_unit": y_unit,
     }

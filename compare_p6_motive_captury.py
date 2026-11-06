@@ -61,6 +61,8 @@ from model_comparison_metrics import (
     joint_center_error_xyz,
     waveform_metrics,
 )
+from gait_cycles import export_gait_results
+from ghoussayni import detect_ghoussayni
 from run_biobuddy_c3d_ik import (
     cached_ik_is_valid,
     ik_cache_fingerprint,
@@ -127,7 +129,6 @@ from temporal_synchronization import (
 DEFAULT_DATA_ROOT = Path("local_trials/2026-06-30_P6_flat")
 DEFAULT_OUTPUT_ROOT = Path("out_p6_motive_captury_comparison")
 ANGLE_LABEL_REGEX = r"(?i)(^.*angles?$|^.*_angle[s]?$|angle)"
-FOOT_MARKER_PATTERN = r"(LFCC|RFCC|LFM|RFM|LDP|RDP|Foot|Toe|Heel)"
 CACHE_VERSION = 13
 ROTATION_SEQUENCE_ZXY = "ZXY"
 DEFAULT_ALIGNMENT_CALIBRATION_CENTRES = (
@@ -140,6 +141,9 @@ SCIENTIFIC_IMPLEMENTATION_FILES = {
     "comparison_batch": Path(__file__),
     "available_source_results": Path(__file__).with_name("available_source_results.py"),
     "comparison_workflow": Path(__file__).with_name("comparison_workflow.py"),
+    "task_cycles": Path(__file__).with_name("task_cycles.py"),
+    "gait_cycles": Path(__file__).with_name("gait_cycles.py"),
+    "ghoussayni": Path(__file__).with_name("ghoussayni.py"),
     "kinematic_conventions_registry": Path(__file__).with_name(
         "kinematic_conventions.json"
     ),
@@ -294,6 +298,26 @@ def trial_cache_fingerprint(
             ),
         },
         "options": {
+            "normalize_gait": bool(getattr(args, "normalize_gait", False)),
+            "cycle_task": getattr(args, "cycle_task", "gait"),
+            "cycle_detection": getattr(args, "cycle_detection", "automatic"),
+            "squat_standing_deg": getattr(args, "squat_standing_deg", 15),
+            "squat_peak_deg": getattr(args, "squat_peak_deg", 40),
+            "jump_height_mm": getattr(args, "jump_height_mm", 30),
+            "gait_events_csv": file_fingerprint(getattr(args, "gait_events_csv", None)),
+            "gait_events_sha256": (
+                file_sha256(args.gait_events_csv)
+                if getattr(args, "gait_events_csv", None)
+                and args.gait_events_csv.is_file()
+                else None
+            ),
+            "gait_min_cycle_s": getattr(args, "gait_min_cycle_s", 0.4),
+            "gait_max_cycle_s": getattr(args, "gait_max_cycle_s", 2.5),
+            "gait_max_gap_s": getattr(args, "gait_max_gap_s", 0.05),
+            "gait_velocity_threshold_m_s": getattr(
+                args, "gait_velocity_threshold_m_s", 0.5
+            ),
+            "gait_filter_hz": getattr(args, "gait_filter_hz", 7.0),
             "sources": list(
                 getattr(args, "sources", ("captury", "motive", "biobuddy"))
             ),
@@ -379,6 +403,10 @@ def required_trial_outputs(
 ) -> list[Path]:
     safe_trial = safe_name(trial_name)
     outputs = [
+        trial_dir / "gait_cycles.json",
+        trial_dir / "lower_limb_kinematics.npz",
+        trial_dir / "gait_cycle_timeseries.npz",
+        trial_dir / "gait_cycle_metrics.npz",
         trial_dir / f"{safe_trial}_motive_with_capjc_motjc.c3d",
         trial_dir / "joint_centre_metrics.csv",
         trial_dir / "joint_centre_timeseries.npz",
@@ -841,7 +869,6 @@ def comparison_input_files(
     """Return every input that materially contributes to this batch run."""
 
     from comparison_workflow import requested_sources
-
     selected = requested_sources(args)
     inputs: dict[str, Path] = {}
     for bundle in trials:
@@ -881,6 +908,8 @@ def comparison_input_files(
         ]
     if getattr(args, "landmark_map", None) is not None:
         inputs["markers/landmark_map"] = args.landmark_map
+    if getattr(args, "gait_events_csv", None) is not None:
+        inputs["gait/initial_contacts"] = args.gait_events_csv
     return inputs
 
 
@@ -924,6 +953,14 @@ def comparison_derived_artifacts(
     artifacts: dict[str, Path] = dict(batch_artifacts or {})
     for report in reports:
         trial = str(report["trial"])
+        for name, path in report.get("outputs", {}).items():
+            if "gait" in name or name in {
+                "lower_limb_kinematics",
+                "hip_kinematics",
+                "knee_kinematics",
+                "ankle_kinematics",
+            }:
+                artifacts[f"{trial}/gait/{name}"] = Path(path)
         models = report.get("models", {})
         for system in ("captury", "motive"):
             biomod = models.get(system, {}).get("biomod")
@@ -2927,13 +2964,15 @@ def detect_trial_events_and_contacts(
     motive_c3d: Path,
     trial_dir: Path,
     trial: str,
-    foot_marker_regex: str = FOOT_MARKER_PATTERN,
     time_start_s: float | None = None,
     time_end_s: float | None = None,
+    gait_velocity_threshold_m_s: float = 0.5,
+    gait_filter_hz: float = 7.0,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    import re
-
-    labels, points_mm, _residuals, time = read_c3d_points_mm(motive_c3d)
+    labels, points_mm, residuals, time = read_c3d_points_mm(motive_c3d)
+    if residuals.shape == points_mm.shape[1:]:
+        points_mm = points_mm.copy()
+        points_mm[:, residuals < 0] = np.nan
     finite = np.all(np.isfinite(points_mm), axis=0)
     dt = float(np.nanmedian(np.diff(time))) if time.shape[0] > 1 else 1.0 / 120.0
     velocity = np.gradient(points_mm, dt, axis=2)
@@ -2950,26 +2989,15 @@ def detect_trial_events_and_contacts(
         int(moving_indices[-1]) if moving_indices.size else int(time.shape[0] - 1)
     )
 
-    regex = re.compile(foot_marker_regex, re.IGNORECASE)
-    left_indices = [
-        i
-        for i, label in enumerate(labels)
-        if regex.search(clean_marker_label(label))
-        and clean_marker_label(label).startswith("L")
-    ]
-    right_indices = [
-        i
-        for i, label in enumerate(labels)
-        if regex.search(clean_marker_label(label))
-        and clean_marker_label(label).startswith("R")
-    ]
-
-    left_contact, left_z, left_speed, left_available = foot_contact_from_markers(
-        points_mm, left_indices, dt
+    gait_detection, gait_rows = detect_ghoussayni(
+        time,
+        labels,
+        points_mm,
+        threshold_m_s=gait_velocity_threshold_m_s,
+        cutoff_hz=gait_filter_hz,
     )
-    right_contact, right_z, right_speed, right_available = foot_contact_from_markers(
-        points_mm, right_indices, dt
-    )
+    left_available = gait_detection["sides"]["left"]["available"]
+    right_available = gait_detection["sides"]["right"]["available"]
     rows: list[dict[str, Any]] = []
     contact_mask = time_window_mask(time, time_start_s, time_end_s)
     for i, time_value in enumerate(time):
@@ -2977,30 +3005,16 @@ def detect_trial_events_and_contacts(
             continue
         rows.append(
             {
+                **gait_rows[i],
                 "trial": trial,
                 "time": float(time_value),
                 "movement_speed_mm_s": float(median_speed[i]),
-                "left_foot_z_mm": (
-                    float(left_z[i]) if np.isfinite(left_z[i]) else np.nan
-                ),
-                "right_foot_z_mm": (
-                    float(right_z[i]) if np.isfinite(right_z[i]) else np.nan
-                ),
-                "left_foot_speed_mm_s": (
-                    float(left_speed[i]) if np.isfinite(left_speed[i]) else np.nan
-                ),
-                "right_foot_speed_mm_s": (
-                    float(right_speed[i]) if np.isfinite(right_speed[i]) else np.nan
-                ),
-                "left_contact": bool(left_contact[i]),
-                "right_contact": bool(right_contact[i]),
-                "left_contact_available": left_available,
-                "right_contact_available": right_available,
             }
         )
     write_rows(trial_dir / "trial_events_contacts.csv", rows)
     report = {
         "trial": trial,
+        "gait_event_detection": gait_detection,
         "movement_start_index": start_index,
         "movement_end_index": end_index,
         "movement_start_time": float(time[start_index]),
@@ -3014,8 +3028,16 @@ def detect_trial_events_and_contacts(
         "used_end_time": (
             float(time[contact_mask][-1]) if np.any(contact_mask) else np.nan
         ),
-        "left_foot_markers": [labels[i] for i in left_indices],
-        "right_foot_markers": [labels[i] for i in right_indices],
+        "left_foot_markers": [
+            label
+            for role in ("left_heel", "left_toe")
+            for label in gait_detection["marker_roles"][role]["labels"]
+        ],
+        "right_foot_markers": [
+            label
+            for role in ("right_heel", "right_toe")
+            for label in gait_detection["marker_roles"][role]["labels"]
+        ],
         "left_contact_available": left_available,
         "right_contact_available": right_available,
     }
@@ -3028,6 +3050,10 @@ def detect_trial_events_and_contacts(
 def contact_cycle_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Return diagnostic foot-contact cycles from Motive kinematic contacts."""
 
+    if rows and rows[0].get("event_method", "").startswith("ghoussayni"):
+        from gait_cycles import cycles_from_contacts
+
+        return cycles_from_contacts(rows)
     cycles: list[dict[str, Any]] = []
     if not rows:
         return {"status": "unavailable", "cycles": cycles}
@@ -3066,6 +3092,78 @@ def contact_cycle_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "minimum_cycle_duration_s": minimum_cycle_duration_s,
         "cycles": cycles,
     }
+
+
+def write_trial_gait_exports(
+    bundle, trial_dir, args, runs, contact_rows, start_s, end_s
+):
+    """Shared cycle exports for available sources on the registered Motive clock."""
+    event_path = trial_dir / "trial_events.json"
+    event_detection = (
+        json.loads(event_path.read_text()).get("gait_event_detection")
+        if event_path.exists()
+        else None
+    )
+    task = getattr(args, "cycle_task", "gait")
+    detection = getattr(args, "cycle_detection", "automatic")
+    events_csv = getattr(args, "gait_events_csv", None)
+    # Legacy CLI callers supplying a CSV still select reviewed events.
+    if detection == "reviewed" and not events_csv:
+        raise ValueError("Select a reviewed event CSV before normalization.")
+    candidate_report = None
+    if (
+        getattr(args, "normalize_gait", False)
+        and bundle.name != args.static_trial
+        and task != "gait"
+    ):
+        from task_cycles import squat_cycles, jump_cycles, reviewed_task_cycles
+
+        settings = dict(
+            min_duration_s=args.gait_min_cycle_s,
+            max_duration_s=args.gait_max_cycle_s,
+            max_gap_s=args.gait_max_gap_s,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        if events_csv:
+            candidate_report = reviewed_task_cycles(
+                events_csv, bundle.name, task, **settings
+            )
+        elif task == "squat":
+            candidate_report = squat_cycles(
+                runs,
+                standing_deg=args.squat_standing_deg,
+                peak_deg=args.squat_peak_deg,
+                **settings,
+            )
+        else:
+            labels, points, residuals, times = read_c3d_points_mm(bundle.motive_c3d)
+            if residuals.shape == points.shape[1:]:
+                points = points.copy()
+                points[:, residuals < 0] = np.nan
+            candidate_report = jump_cycles(
+                labels, points, times, height_mm=args.jump_height_mm, **settings
+            )
+    return export_gait_results(
+        trial_dir,
+        bundle.name,
+        [run for run in runs if run is not None],
+        contact_rows,
+        participant=bundle.participant,
+        task=task,
+        cycle_report=candidate_report,
+        enabled=getattr(args, "normalize_gait", False),
+        is_static=bundle.name == args.static_trial,
+        events_csv=getattr(args, "gait_events_csv", None),
+        event_detection=event_detection,
+        start_s=start_s,
+        end_s=end_s,
+        n_points=getattr(args, "phase_normalization_points", 101),
+        min_duration_s=getattr(args, "gait_min_cycle_s", 0.4),
+        max_duration_s=getattr(args, "gait_max_cycle_s", 2.5),
+        max_gap_s=getattr(args, "gait_max_gap_s", 0.05),
+        write_npz=write_table_npz,
+    )
 
 
 SEGMENT_LENGTH_PAIR_CANDIDATES = [
@@ -4272,8 +4370,12 @@ def compare_trial(
         motive.time,
         args.angle_label_regex,
     )
-    detected_event_report, _ = detect_trial_events_and_contacts(
-        bundle.motive_c3d, trial_dir, bundle.name
+    detected_event_report, full_contact_rows = detect_trial_events_and_contacts(
+        bundle.motive_c3d,
+        trial_dir,
+        bundle.name,
+        gait_velocity_threshold_m_s=getattr(args, "gait_velocity_threshold_m_s", 0.5),
+        gait_filter_hz=getattr(args, "gait_filter_hz", 7.0),
     )
     cut_start_s, cut_end_s, effective_cut_mode = resolve_cut_window(
         args.cut_mode, args.time_start, args.time_end, detected_event_report
@@ -4308,6 +4410,7 @@ def compare_trial(
         force=args.no_cache,
         cache_only=not args.run_ik_batch,
     )
+    biobuddy_full_run = biobuddy_run
     if biobuddy_run is not None:
         biobuddy_run = trim_model_run(biobuddy_run, cut_start_s, cut_end_s)
     cap_aligned_metrics_mm = trim_centres(
@@ -4486,6 +4589,8 @@ def compare_trial(
         bundle.name,
         time_start_s=cut_start_s,
         time_end_s=cut_end_s,
+        gait_velocity_threshold_m_s=getattr(args, "gait_velocity_threshold_m_s", 0.5),
+        gait_filter_hz=getattr(args, "gait_filter_hz", 7.0),
     )
     dimension_rows = model_dimension_rows(bundle.name, [captury, motive])
     biobuddy_dimension_extra_rows, biobuddy_dimension_report = biobuddy_dimension_rows(
@@ -4576,6 +4681,15 @@ def compare_trial(
             row["family"] = family
         normalized_scientific_rows.extend(normalized)
     cycles = contact_cycle_report(contact_rows)
+    gait_report, gait_outputs = write_trial_gait_exports(
+        bundle,
+        trial_dir,
+        args,
+        [captury, motive, biobuddy_full_run],
+        full_contact_rows,
+        cut_start_s,
+        cut_end_s,
+    )
     summary_tables = (
         centre_rows,
         calibration_centre_rows,
@@ -4785,6 +4899,7 @@ def compare_trial(
         },
         "trial_events": event_report,
         "contact_cycles": cycles,
+        "gait_normalization": gait_report,
         "metric_quality": quality,
         "metric_sensitivity": sensitivity,
         "segment_rotations": segment_report,
@@ -4825,6 +4940,7 @@ def compare_trial(
         },
     }
     report["biobuddy_ik_batch"] = biobuddy_ik_report
+    report["outputs"].update(gait_outputs)
     if args.visualize and (
         args.visualize_trial is None or args.visualize_trial == bundle.name
     ):
@@ -4914,6 +5030,45 @@ def parse_args() -> argparse.Namespace:
         help="Number of samples used to normalize the selected phase to 0-100%%.",
     )
     parser.add_argument("--model-source", choices=["auto", "bvh", "fbx"], default="bvh")
+    parser.add_argument(
+        "--normalize-gait",
+        action="store_true",
+        help="Normalize selected task cycles to 0-100%%; cache results for explicit GUI CSV export.",
+    )
+    parser.add_argument(
+        "--gait-events-csv",
+        type=Path,
+        help="Reviewed gait contacts: trial,side,time_s; squat/jump: trial,start_s,end_s. Times use the Motive clock.",
+    )
+    parser.add_argument(
+        "--cycle-task", choices=["gait", "squat", "jump"], default="gait"
+    )
+    parser.add_argument(
+        "--cycle-detection", choices=["automatic", "reviewed"], default="automatic"
+    )
+    parser.add_argument("--squat-standing-deg", type=float, default=15)
+    parser.add_argument("--squat-peak-deg", type=float, default=40)
+    parser.add_argument("--jump-height-mm", type=float, default=30)
+    parser.add_argument("--gait-min-cycle-s", type=float, default=0.4)
+    parser.add_argument(
+        "--gait-velocity-threshold-m-s",
+        type=float,
+        default=0.5,
+        help="Ghoussayni heel/toe sagittal speed threshold (m/s), fixed-threshold literature variant.",
+    )
+    parser.add_argument(
+        "--gait-filter-hz",
+        type=float,
+        default=7.0,
+        help="Zero-phase fourth-order Butterworth marker filter cutoff (Hz).",
+    )
+    parser.add_argument("--gait-max-cycle-s", type=float, default=2.5)
+    parser.add_argument(
+        "--gait-max-gap-s",
+        type=float,
+        default=0.05,
+        help="Maximum interpolated coordinate gap in seconds.",
+    )
     parser.add_argument(
         "--audit-bvh-fbx-rotations",
         action="store_true",
@@ -5197,6 +5352,21 @@ def run_occlusions_only(
 
 def main() -> None:
     args = parse_args()
+    if not (
+        np.isfinite(args.gait_min_cycle_s)
+        and np.isfinite(args.gait_max_cycle_s)
+        and 0 < args.gait_min_cycle_s < args.gait_max_cycle_s
+        and np.isfinite(args.gait_max_gap_s)
+        and args.gait_max_gap_s > 0
+        and np.isfinite(args.gait_velocity_threshold_m_s)
+        and args.gait_velocity_threshold_m_s > 0
+        and np.isfinite(args.gait_filter_hz)
+        and args.gait_filter_hz > 0
+        and args.phase_normalization_points >= 2
+    ):
+        raise ValueError(
+            "Invalid gait duration, velocity threshold, filter, interpolation gap, or normalization sample count."
+        )
     if args.model_to_c3d_axis != "auto":
         raise ValueError(
             "--model-to-c3d-axis is a legacy shared option and must be auto "
@@ -5229,6 +5399,15 @@ def main() -> None:
         trials = [bundle for bundle in trials if bundle.name in requested]
     if not trials:
         raise RuntimeError(f"No trials found in {args.data_root}.")
+    if (
+        args.gait_events_csv
+        and len([b for b in trials if b.name != args.static_trial]) > 1
+    ):
+        with args.gait_events_csv.open(newline="", encoding="utf-8-sig") as stream:
+            if "trial" not in (csv.DictReader(stream).fieldnames or []):
+                raise ValueError(
+                    "A contact CSV used for multiple trials must include a trial column."
+                )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     provenance_trials = (
         trials
@@ -5272,7 +5451,6 @@ def main() -> None:
     )
     _, trials = split_static_calibration_trial(trials, args.static_trial)
     from comparison_workflow import ComparisonWorkflow
-
     workflow = ComparisonWorkflow(static_bundle, args, api=sys.modules[__name__])
     reports: list[dict[str, Any]] = []
     provenance_reports: list[dict[str, Any]] = []
@@ -5292,6 +5470,7 @@ def main() -> None:
     all_dimension_rows: list[dict[str, Any]] = []
     all_marker_rows: list[dict[str, Any]] = []
     all_segment_rows: list[dict[str, Any]] = []
+    all_gait_rows: list[dict[str, Any]] = []
     for report in reports:
         trial_dir = args.out_dir / safe_name(report["trial"])
         centre_csv = trial_dir / "joint_centre_metrics.csv"
@@ -5300,6 +5479,11 @@ def main() -> None:
         dimension_csv = trial_dir / "model_dimensions.csv"
         marker_csv = trial_dir / "skin_marker_correspondence_metrics.csv"
         segment_csv = trial_dir / "segment_rotation_metrics.csv"
+        gait_npz = trial_dir / "gait_cycle_metrics.npz"
+        if gait_npz.exists():
+            from gui_graphs import read_table_npz
+
+            all_gait_rows.extend(read_table_npz(gait_npz).to_dict("records"))
         if centre_csv.exists() and centre_csv.stat().st_size:
             all_centre_rows.extend(pd.read_csv(centre_csv).to_dict("records"))
         if q_csv.exists() and q_csv.stat().st_size:
@@ -5319,6 +5503,7 @@ def main() -> None:
     write_rows(args.out_dir / "all_motive_marker_occlusions.csv", all_occlusion_rows)
     write_rows(args.out_dir / "all_model_dimensions.csv", all_dimension_rows)
     write_rows(args.out_dir / "all_segment_rotation_metrics.csv", all_segment_rows)
+    write_table_npz(args.out_dir / "all_gait_cycle_metrics.npz", all_gait_rows)
     write_rows(
         args.out_dir / "all_skin_marker_correspondence_metrics.csv", all_marker_rows
     )
